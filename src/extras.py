@@ -43,3 +43,54 @@ def print_section_header(header_txt):
     """
     print(">>>  %s ... " % header_txt)
     print_line()
+
+class SetWriter:
+    """
+    Utility class for writing DrugBank statements
+    Enforces uniqueness of statements between written between flushes
+    Set clear_on_flush to false to enforce uniquness for on all writes
+    (should not be set for very large datasets)
+    """
+    def __init__(self, path):
+        """
+        Initialize a new SetWriter
+
+        Parameters
+        ----------
+        """
+        self._lines = []
+        self._lineset = set()
+        self._fd = open(path, 'w', encoding='utf-8')
+        self._clear_on_flush = True
+        self._closed = False
+
+    @property
+    def clear_on_flush(self):
+        return self._clear_on_flush
+
+    @clear_on_flush.setter
+    def clear_on_flush(self, value):
+        self._clear_on_flush = value 
+
+    def write(self, line):
+        if self._closed:
+            raise ValueError('I/O operation on closed file')
+        
+        if line in self._lineset:
+            return
+        self._lineset.add(line)
+        self._lines.append(line)
+
+    def flush(self):
+        if self._closed:
+            raise ValueError('I/O operation on closed file')
+        self._fd.writelines(self._lines)
+        self._lines = []
+        if self._clear_on_flush:
+            self._lineset = set()
+
+    def close(self):
+        if len(self._lines) > 0:
+            self.flush()
+        self._lineset = set()
+        self._fd.close()

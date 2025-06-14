@@ -26,6 +26,19 @@ print("\033[0m")
 
 uniprot_db = os.path.join(sources_dp, 'uniprot/')
 download_uniprot_files(uniprot_db, config)
+# chembl_db = os.path.join(sources_dp, 'chembl/')
+# download_chembl_data(chembl_db, config)
+# drugbank_db = os.path.join(sources_dp, 'drugbank/')
+# download_drugbank_data(drugbank_db, config, username, password)
+# bindingdb_db = os.path.join(sources_dp, 'bindingdb/')
+# download_bindingdb_data(bindingdb_db, config)
+iuphar_db = os.path.join(sources_dp, 'iuphar/')
+download_iuphar_data(iuphar_db, config)
+pdsp_db = os.path.join(sources_dp, 'pdsp/')
+download_pdsp_data(pdsp_db, config)
+
+
+
 reactome_db = os.path.join(sources_dp, 'reactome/')
 download_reactome_data(reactome_db, config)
 ctd_db = os.path.join(sources_dp, 'ctd/')
@@ -50,8 +63,7 @@ hpa_db = os.path.join(sources_dp, 'hpa/')
 download_hpa_data(hpa_db, config)
 cellosaurus_db = os.path.join(sources_dp, 'cellosaurus/')
 download_cellosaurus_data(cellosaurus_db, config)
-drugbank_db = os.path.join(sources_dp, 'drugbank/')
-download_drugbank_data(drugbank_db, config, username, password)
+
 
 foodb_db = os.path.join(sources_dp, 'foodb/')
 download_foodb_data(foodb_db, config)
@@ -93,6 +105,37 @@ rnainter_db = os.path.join(sources_dp, 'rnainter/')
 download_rnainter_data(rnainter_db, config)
 
 #%%
+# ----------------------------------------------------------------------
+# processing uniprot entries file
+uniprot_parser = UniProtGPCRParser()
+uniprot_dp = join(preprocessed_dp, 'uniprot')
+os.makedirs(uniprot_dp, exist_ok=True)
+uniprot_output_fps = [join(uniprot_dp, fn) for fn in uniprot_parser.filenames]
+invalid_md5 = bool(sum([not file_has_valid_md5(ofp) for ofp in uniprot_output_fps]))
+
+if invalid_md5:
+    uniprot_parser.parse(uniprot_db, uniprot_dp)
+    for ofp in uniprot_output_fps:
+        export_file_md5(ofp)
+else:
+    print(inf_sym + "Uniprot processed files exists with valid md5 hashes %s. >>> Parsing not required." % done_sym)
+
+# ----------------------------------------------------------------------
+# processing ChEMBL files
+chembl_parser = ChEMBLParser()
+chembl_dp = join(preprocessed_dp, 'chembl')
+os.makedirs(chembl_dp, exist_ok=True)
+chembl_fps = [join(chembl_dp, fn) for fn in chembl_parser.filenames]
+invalid_md5 = bool(sum([not file_has_valid_md5(ofp) for ofp in chembl_fps]))
+
+if invalid_md5:
+    chembl_parser.parse_chem_db(chembl_db, chembl_dp)
+    for ofp in chembl_fps:
+        export_file_md5(ofp)
+else:
+    print(inf_sym + "ChEMBL processed files exists with valid md5 hashes %s. >>> Parsing not required." % done_sym)
+
+
 # ----------------------------------------------------------------------
 # processing ncbi gene entries file
 ncbigene_parser = NCBIGeneParser()
@@ -168,20 +211,6 @@ if invalid_md5:
 else:
     print(inf_sym + "PubChem processed files exists with valid md5 hashes %s. >>> Parsing not required." % done_sym)
 
-# ----------------------------------------------------------------------
-# processing uniprot entries file
-uniprot_parser = UniProtTxtParser()
-uniprot_dp = join(preprocessed_dp, 'uniprot')
-os.makedirs(uniprot_dp, exist_ok=True)
-uniprot_output_fps = [join(uniprot_dp, fn) for fn in uniprot_parser.filenames]
-invalid_md5 = bool(sum([not file_has_valid_md5(ofp) for ofp in uniprot_output_fps]))
-
-if invalid_md5:
-    uniprot_parser.parse(uniprot_db, uniprot_dp)
-    for ofp in uniprot_output_fps:
-        export_file_md5(ofp)
-else:
-    print(inf_sym + "Uniprot processed files exists with valid md5 hashes %s. >>> Parsing not required." % done_sym)
 
 # ----------------------------------------------------------------------
 # processing HPA entries file
@@ -357,20 +386,6 @@ else:
     print(
         inf_sym + "Hijazi20 processed files exists with valid md5 hashes %s. >>> Parsing not required." % done_sym)
 
-# ----------------------------------------------------------------------
-# processing ChEMBL files
-chembl_parser = ChEMBLParser()
-chembl_dp = join(preprocessed_dp, 'chembl')
-os.makedirs(chembl_dp, exist_ok=True)
-chembl_fps = [join(chembl_dp, fn) for fn in chembl_parser.filenames]
-invalid_md5 = bool(sum([not file_has_valid_md5(ofp) for ofp in chembl_fps]))
-
-if invalid_md5:
-    chembl_parser.parse_chem_db(chembl_db, chembl_dp)
-    for ofp in chembl_fps:
-        export_file_md5(ofp)
-else:
-    print(inf_sym + "ChEMBL processed files exists with valid md5 hashes %s. >>> Parsing not required." % done_sym)
 
 # ----------------------------------------------------------------------
 # processing FOODB files

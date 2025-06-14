@@ -466,474 +466,608 @@ class UniProtGPCRParser:
         
         print(f"Saved {len(all_entries)} GPCR entries to {output_file}")
 
-
-class UniProtTxtParser:
+class ChEMBLParser:
     """
-    A UNIPROT database text file parser class
+    ChEMBL database parser
     """
     def __init__(self):
-        self.filepath = ""
-        self.output_dp = ""
-        self._interpro_map = {}
+        """
+        Initialise ChEMBL parser class instance
+        """
         self._filenames = [
-            "uniprot_facts.txt", 
-            "uniprot_metadata.txt", 
-            "uniprot_ppi.txt",
-            "kinase_family.txt",
-            "specie_map.json"
+            'chembl_cpi.tsv',
+            'chembl_dti.tsv',
+            'chembl_cinfo.tsv',
+            'chembl_tinfo.tsv',
+            'chembl_cpi.txt',
+            'chembl_dti.txt'
         ]
-        self._specie_map = {}
+        self.init_querys()
+        self.db_file_path = "database/processed/chembl/chembl_sqlite.db"
 
     @property
     def filenames(self):
+        """
+        Get MedGen filenames
+
+        Returns
+        -------
+        filename : str
+            the names of the MedGen output files
+        """
         return self._filenames
 
-    def __parse_txt_entry(self, entry):
-        """ Process a Uniprot txt entry
-
-        Parameters
-        ----------
-        entry : list
-            list of str lines representing the entry lines
-
-        Returns
-        -------
-        list
-            list of extracted facts
-        """
-        valid_species = True
-        entry_facts = []
-        entry_metadata = []
-        entry_ppi = []
-        # species_list = map(lambda x: x.node, VALID_SPECIES)
-        entry_dictionary = dict()
-        for line in entry:
-            line_prefix = line[:2]
-            if line_prefix == "  ":
-                line_prefix = "AA"
-
-            if line_prefix not in entry_dictionary:
-                entry_dictionary[line_prefix] = ""
-
-            entry_dictionary[line_prefix] += " " + line[2:].lstrip()
-
-        # ------------------------------------------------------------------------
-        # Processing IDs and UniProt ACs
-        # ------------------------------------------------------------------------
-        entry_code = entry_dictionary["AC"].strip().split(";")[0]
-        row = entry_dictionary["AC"].split()
-        if len(row) > 2:
-            for idx in range(2, len(row)):
-                entry_metadata.append([entry_code, "OTHER_ID", row[idx][:-1]])
-
-        entry_name = entry_dictionary["ID"].strip().split(" ")[0].split("_")[0]
-        entry_species = entry_dictionary["ID"].strip().split(" ")[0].split("_")[-1]
-
-        entry_metadata.append([entry_code, "NAME", entry_name])
-        entry_metadata.append([entry_code, "SPECIES", entry_species])
-        self._specie_map[entry_code] = entry_species
-        # ------------------------------------------------------------------------
-        # Processing DE prefix section
-        # ------------------------------------------------------------------------
-        if "DE" in entry_dictionary:
-            full_names = [v[:-1].strip().replace("Full=", "") for v in
-                          re.findall("Full=[^;]+;", entry_dictionary["DE"])]
-            short_names = [v[:-1].strip().replace("Short=", "") for v in
-                           re.findall("Short=[^;]+;", entry_dictionary["DE"])]
-
-            for full_n in full_names:
-                entry_metadata.append([entry_code, "FULL_NAME", full_n])
-            for short_n in short_names:
-                entry_metadata.append([entry_code, "SHORT_NAME", short_n])
-
-        # ------------------------------------------------------------------------
-        # Processing OX prefix section
-        # ------------------------------------------------------------------------
-        if "OX" in entry_dictionary:
-            organism_id = entry_dictionary['OX'].strip()
-            organism_id = organism_id.split('=')[1]
-            if organism_id.endswith(';'):
-                organism_id = organism_id[0:-1]
-
-            organism_id = organism_id.split(' ')[0]
-            valid_species = True
-        # ------------------------------------------------------------------------
-        # Processing OC prefix section
-        # ------------------------------------------------------------------------
-        if "OC" in entry_dictionary:
-            organism_classes = [c.strip() for c in entry_dictionary["OC"].strip().split(";")]
-            for oc in organism_classes:
-                entry_metadata.append([entry_code, "ORGANISM_CLASS", oc])
-
-        # ------------------------------------------------------------------------
-        # Processing RX prefix section
-        # ------------------------------------------------------------------------
-        if "RX" in entry_dictionary:
-            pubmed_ids = ["pubmed:"+v.split("=")[-1] for v in re.findall(PUBMED_ID_CODE, entry_dictionary["RX"])]
-            for pm in pubmed_ids:
-                entry_metadata.append([entry_code, "RELATED_PUBMED_ID", pm])
-
-        # ------------------------------------------------------------------------
-        # Processing KW prefix section
-        # ------------------------------------------------------------------------
-        if "KW" in entry_dictionary:
-            keywords = [v.strip() for v in entry_dictionary["KW"].replace(".", "").strip().split(";")]
-            for kw in keywords:
-                entry_metadata.append([entry_code, "RELATED_KEYWORD", kw])
-
-        # ------------------------------------------------------------------------
-        # Processing DR prefix section
-        # ------------------------------------------------------------------------
-        if "DR" in entry_dictionary:
-            links_lines = entry_dictionary["DR"].strip().split(".")
-            links_lines_dict = dict()
-            for line in links_lines:
-                db_name = line.strip().split(";")[0]
-                if db_name not in links_lines_dict:
-                    links_lines_dict[db_name] = []
-                links_lines_dict[db_name].append(line.strip())
-
-            if "GO" in links_lines_dict:
-                go_lines = links_lines_dict["GO"]
-                for line in go_lines:
-                    go_code = line.split(";")[1].strip()
-                    if "; F:" in line:
-                        go_code_type = "GO_BP"
-                    elif "; P:" in line:
-                        go_code_type = "GO_MF"
-                    else:
-                        go_code_type = "GO_CC"
-                    entry_facts.append([entry_code, go_code_type, go_code])
-
-            if "HPA" in links_lines_dict:
-                hpa_lines = links_lines_dict["HPA"]
-                for line in hpa_lines:
-                    hpa_code = line.split(";")[1].strip()
-                    entry_facts.append([entry_code, "RELATED_ANTIBODY", hpa_code])
-
-            if "Reactome" in links_lines_dict:
-                reactome_lines = links_lines_dict["Reactome"]
-                for line in reactome_lines:
-                    reactome_code = line.split(";")[1].strip()
-                    entry_facts.append([entry_code, "RELATED_PATHWAY", reactome_code])
-        
-            if "DrugBank" in links_lines_dict:
-                drugbank_lines = links_lines_dict["DrugBank"]
-                for line in drugbank_lines:
-                    drugbank_code = line.split(";")[1].strip()
-                    entry_facts.append([entry_code, "TARGET_OF_DRUG", drugbank_code])
-
-            if "InterPro" in links_lines_dict:
-                interpro_lines = links_lines_dict["InterPro"]
-                for line in interpro_lines:
-                    interpro_code = line.split(";")[1].strip()
-                    if interpro_code in self._interpro_map:
-                        entry_facts.append([entry_code, self._interpro_map[interpro_code], interpro_code])
-
-            if 'PROSITE' in links_lines_dict:
-                prosite_lines = links_lines_dict["PROSITE"]
-                for line in prosite_lines:
-                    prosite_code = line.split(";")[1].strip()
-                    entry_facts.append([entry_code, "PS_SEQ_ANN", prosite_code])
+    def init_querys(self):
+        self.query_cpi = """
+            SELECT
+                m.chembl_id  AS compound_chembl_id,
+                t.chembl_id  AS target_chembl_id,
+                act.standard_type,
+                act.standard_relation,
+                act.standard_value,
+                act.standard_units,
+                act.activity_comment,
+                GROUP_CONCAT(COALESCE(d.pubmed_id, d.doi), ',') AS pubmed_id_or_doi
+                
+            FROM activities AS act
+                JOIN molecule_dictionary m ON act.molregno = m.molregno
+                JOIN compound_records r ON m.molregno = r.molregno
+                JOIN docs d ON r.doc_id = d.doc_id
+                JOIN assays a ON act.assay_id = a.assay_id
+                JOIN target_dictionary t ON a.tid = t.tid
             
-        # # add string cross references   
-        #     if "STRING" in links_lines_dict:
-        #         string_lines = links_lines_dict["STRING"]
-        #         for line in string_lines:
-        #             string_code = line.strip()
-        #             entry_facts.append([entry_code, "STRING_ID", string_code])
-        # ------------------------------------------------------------------------
-        # Processing OC prefix section
-        # ------------------------------------------------------------------------
-        if "CC" in entry_dictionary:
-            comments_cats_dict = dict()
-            comments_list = [v.strip() for v in entry_dictionary["CC"].strip().split("-!-") if len(v)>3]
-            for comment in comments_list:
-                comment_cat = comment[:comment.find(":")].strip()
-                comment_val = comment[comment.find(":")+1:].strip()
-                comments_cats_dict[comment_cat] = comment_val
-            if "INTERACTION" in comments_cats_dict:
-                interactors_uniprot_acs = re.findall(P_UNIPROT_CODE, comments_cats_dict["INTERACTION"])
-                for up_id in interactors_uniprot_acs:
-                    entry_ppi.append([entry_code, "INTERACTS_WITH", up_id])
-            if "DISEASE" in comments_cats_dict:
-                disease_codes = re.findall(P_DISEASE_CODE, comments_cats_dict["DISEASE"])
-                for c in disease_codes:
-                    entry_facts.append([entry_code, "RELATED_GENETIC_DISORDER", c])
-
-        # ------------------------------------------------------------------------
-        # Processing FT prefix section [Sequence annotations]
-        # ------------------------------------------------------------------------
-        if "FT" in entry_dictionary:
-            ft_content = entry_dictionary["FT"]
-            seq_ranges = [v.strip().split() for v in re.findall(SEQ_RANGE_CODE, ft_content)]
-            seq_annotations = [v.strip().split() for v in re.findall(SEQ_NOTE__CODE, ft_content)]
-
-        # ------------------------------------------------------------------------
-        if valid_species:
-            return entry_facts, entry_metadata, entry_ppi
-        else:
-            return [], [], []
-
-    def _parse_pkinfam(self, pkinfam_fp, output_dp):
-        pattern = re.compile(r'\((?P<acc>[A-Za-z0-9 ]*)\)')
-        kinase_family = {}
-        prev_line = ''
-        header_started = False
-        header_found = False
-        header = ''
-        with open(pkinfam_fp, 'r') as fd:
-            for line in fd:
-                if set(line.strip()) == set('='):
-                    if header_started:
-                        header_started = False
-                        header_found = True
-                        header = prev_line
-                        kinase_family[header] = set()
-                    else:
-                        header_started = True
-                        header_found = False
-                elif header_found:
-                    prev_line = line
-                    accs = [x.strip() for x in pattern.findall(line)]
-                    kinase_family[header].update(accs)
-                else:
-                    prev_line = line
-        
-        output_fd = open(join(output_dp, 'kinase_family.txt'), 'w')
-        for family, kinase_set in kinase_family.items():
-            if family.startswith('Atypical'):
-                parts = family.strip().split()
-                if parts[1] == 'PI3/PI4-kinase':
-                    family_str = 'AT_PI3/PI4'
-                else:
-                    family_str = 'AT_'+parts[1]
-            else:
-                family_str = family.strip().split()[0]
-            for kinase in kinase_set:
-                output_fd.write(f'{kinase}\tKINASE_FAMILY\t{family_str}\n')
-        output_fd.close()
-
-
-    def parse(self, sources_dp, output_dp):
-        """ Parse a Uniprot textual data file and output findings to a set of files in a specified directory
-
-        Parameters
-        ----------
-        sources_dp : str
-            absolute path to the sources directory
-
-        output_dp : str
-            absolute path of the output directory
+            WHERE 
+                a.assay_type = 'B'
+                
+            GROUP BY 
+                m.chembl_id , t.chembl_id
+                
+            ORDER BY 
+                m.chembl_id , t.chembl_id;
         """
-        filepath = join(sources_dp, "swissprot_entries.txt.gz")
-        interpro_fp = join(sources_dp, "interpro_entries.txt")
-        pkinfam_fp = join(sources_dp, 'pkinfam.txt')
 
-        self.filepath = filepath
-        self.output_dp = output_dp
+        self.query_dti = """
+            SELECT
+                m.chembl_id  AS compound_chembl_id,
+                dm.action_type,
+                t.chembl_id  AS target_chembl_id,
+                GROUP_CONCAT(mr.ref_type || '::' || mr.ref_id, ';') AS refs
+                
+            FROM drug_mechanism AS dm
+                JOIN molecule_dictionary m ON dm.molregno = m.molregno
+                JOIN target_dictionary t ON dm.tid = t.tid
+                JOIN mechanism_refs mr ON dm.mec_id = mr.mec_id
 
-        facts_fd = open(join(output_dp, "uniprot_facts.txt"), "w")
-        metadata_fd = open(join(output_dp, "uniprot_metadata.txt"), "w")
-        ppi_fd = open(join(output_dp, "uniprot_ppi.txt"), "w")
+            GROUP BY 
+                m.chembl_id , t.chembl_id
 
-        line_index = 0
-        nb_facts = 0
-        nb_metadata = 0
-        nb_ppi = 0
-        self._parse_pkinfam(pkinfam_fp, output_dp)
+            ORDER BY 
+                m.chembl_id , t.chembl_id;
+            """
 
-        with open(interpro_fp, 'r') as fd:
-            next(fd)
-            for line in fd:
-                interpro_id, interpro_type = line.strip().split('\t')[:2]
-                self._interpro_map[interpro_id] = interpro_type.upper()
-        with gzip.open(filepath, 'rt') as fd:
-            current_entry = []
-            print_section_header("Parsing Uniprot file (%s)" % (bcolors.OKGREEN + filepath + bcolors.ENDC))
-            start = timer()
-            eof = False
-            while not eof:
-                raw_line = fd.readline()
-                line = raw_line.rstrip()
-                if line != "//":
-                    current_entry.append(line)
-                else:
-                    facts, metadata, ppi = self.__parse_txt_entry(current_entry)
+        self.query_cinfo = """
+            SELECT
+                cs.standard_inchi_key AS InChIKey,
+                cs.canonical_smiles AS SMILES,
+                m.chembl_id  AS "ChEMBL ID",
+                cs.standard_inchi AS InChI
 
-                    nb_facts += len(facts)
-                    nb_metadata += len(metadata)
-                    nb_ppi += len(ppi)
+            FROM molecule_dictionary AS m
+                JOIN compound_structures cs ON m.molregno = cs.molregno
 
-                    export_triplets(facts, facts_fd)
-                    export_triplets(metadata, metadata_fd)
-                    export_triplets(ppi, ppi_fd)
-                    facts_fd.flush()
-                    metadata_fd.flush()
-                    ppi_fd.flush()
-                    current_entry = []
+            GROUP BY 
+                m.chembl_id
 
-                line_index += 1
-                if line_index % 5000 == 0:
-                    speed = int(line_index / (timer()-start))
-                    msg = prc_sym + "Processing (%d) lines/second => [facts:%d - metadata:%d - ppi:%d - total: %d]" \
-                          % (speed, nb_facts, nb_metadata, nb_ppi, nb_facts + nb_metadata + nb_ppi)
-                    print("\r" + msg, end="", flush=True)
+            ORDER BY 
+                m.chembl_id;
+            """
 
-                if raw_line == "":
-                    eof = True
-                    print(done_sym + " Took %1.2f Seconds." % (timer()-start), flush=True)
+        self.query_tinfo = """
+            SELECT
+                t.chembl_id  AS target_chembl_id,
+                t.pref_name AS target_name,
+                c.accession AS protein_accession,
+                c.sequence AS protein_sequence
 
-        facts_fd.close()
-        metadata_fd.close()
-        ppi_fd.close()
+            FROM target_dictionary AS t
+                JOIN target_components tc ON t.tid = tc.tid
+                JOIN component_sequences c ON tc.component_id = c.component_id 
 
-        with open(join(output_dp, 'specie_map.json'), 'w') as fd:
-            json.dump(self._specie_map, fd)
+            GROUP BY 
+                t.chembl_id
 
+            ORDER BY 
+                t.chembl_id;
+            """
 
-class HumanProteinAtlasParser:
-    """
-    A Human Protein Atlas database parser
-    """
-    def __init__(self):
-        """
-        initialise new class instance
-        """
-        self.filepath = ""
-        self.output_dp = ""
-        # TODO: hpa_cellines_exp.txt 空的
-
-    def __parse_hpa_xml_entry(self, entry):
-        """ parse an xml element of an HPA entry
-
-        Parameters
-        ----------
-        entry : xml.etree.ElementTree.Element
-            xml element
-
-        Returns
-        -------
-        dict
-            dictionary of parsed data
-        """
-        parsed_data = {"rna": [], "tissue": [], "ab": []}
-
-        antibody_list = entry.findall("antibody")
-        tissue_expression_list = entry.findall("tissueExpression")
-        rna_expression_list = entry.findall("rnaExpression")
-
-        if tissue_expression_list is not None:
-            for tissue_expression in tissue_expression_list:
-                data_elements = tissue_expression.findall("data")
-                for el in data_elements:
-                    cell_line = el.find("cellLine")
-                    if cell_line is not None:
-                        cell_line = cell_line.text
-                        cell_line_level = el.find("level").text
-                        parsed_data["tissue"].append(["CELLINE", cell_line, cell_line_level])
-
-                    tissue = el.find("tissue").text.replace(" ", "_")
-                    tissue_level = el.find("level").text
-                    t_cells = el.findall("tissueCell")
-                    parsed_data["tissue"].append(["TISSUE", tissue, tissue_level])
-                    for tc in t_cells:
-                        cell_type = tc.find("cellType").text.replace(" ", "_")
-                        cell_type_level = tc.find("level").text
-                        parsed_data["tissue"].append(["TISSUE", tissue + "__" + cell_type, cell_type_level])
-        if rna_expression_list is not None:
-            for rna_expression in rna_expression_list:
-                data_elements = rna_expression.findall("data")
-                for el in data_elements:
-                    cell_line = el.find("cellLine")
-                    if cell_line is not None:
-                        cell_line_name = cell_line.text.replace(" ", "_")
-                        cell_line_level = "NormRNA_EXP:" + el[1].attrib["expRNA"]
-                        cellosaurus_id = cell_line.attrib["cellosaurusID"]
-                        cellosaurus_id = "NA" if cellosaurus_id == "" else cellosaurus_id
-                        organ = cell_line.attrib["organ"]
-                        suffix = "%s#%s" % (organ, cellosaurus_id)
-                        parsed_data["rna"].append(["CELLINE", cell_line_name, cell_line_level, suffix])
-
-                    tissue = el.find("tissue")
-                    if tissue is not None:
-                        tissue = tissue.text.replace(" ", "_")
-                        tissue_level = el.find("level").text
-                        t_cells = el.findall("tissueCell")
-                        parsed_data["rna"].append(["RNA", tissue, tissue_level])
-                        for tc in t_cells:
-                            cell_type = tc.find("cellType").text.replace(" ", "_")
-                            cell_type_level = tc.find("level").text
-                            parsed_data["rna"].append(["RNA", tissue + "__" + cell_type, cell_type_level])
-
-        if antibody_list is not None:
-            for antibody_elem in antibody_list:
-                ab_id = antibody_elem.attrib["id"]
-                antigen = antibody_elem.find("antigenSequence").text
-                parsed_data["ab"].append(["ANTIBODY", ab_id, antigen])
-        return parsed_data
-
-    def parse_database_xml(self, filepath, output_dp):
-        """ Parse HPA xml file
+    def unpack_db(self, filepath, output_dp):
+        """ Parse ChEMBL database tar.gz file
 
         Parameters
         ----------
         filepath : str
-            absolute file path of the hpa xml file
+            Absolute path to the ChEMBL .tar.gz database file
         output_dp : str
-            path of the output directory
+            Absolute path of the output directory
         """
         self.filepath = filepath
         self.output_dp = output_dp
-        xml_fd = gzip.open(filepath)
-        cl_exp_fp = join(output_dp, "hpa_cellines_exp.txt")
-        tissue_exp_fp = join(output_dp, "hpa_tissues_exp.txt")
-        ab_data_fp = join(output_dp, "hpa_antibodies.txt")
 
-        cl_exp_fd = open(cl_exp_fp, "w")
-        tissue_exp_fd = open(tissue_exp_fp, "w")
-        ab_data_fd = open(ab_data_fp, "w")
-        
-        print_section_header("Parsing HPA XML file (%s)" % (bcolors.OKGREEN + filepath + bcolors.ENDC))
+        # Ensure the output directory exists
+        os.makedirs(output_dp, exist_ok=True)
+
+        # Extract the tar.gz file
+        with tarfile.open(filepath, "r:gz") as tar:
+            members = tar.getmembers()
+            for member in members:
+                # Flatten nested directories
+                member.name = os.path.basename(member.name)
+                if member.name:  # Only process non-empty names
+                    tar.extract(member, path=output_dp)
+
+        # Move extracted files directly to output_dp if nested in subfolders
+        for root, _, files in os.walk(output_dp):
+            for file in files:
+                source_path = os.path.join(root, file)
+                target_path = os.path.join(output_dp, file)
+                if source_path != target_path:
+                    os.rename(source_path, target_path)
+
+        # Clean up any remaining empty directories
+        for root, dirs, _ in os.walk(output_dp, topdown=False):
+            for directory in dirs:
+                dir_path = os.path.join(root, directory)
+                if not os.listdir(dir_path):
+                    os.rmdir(dir_path)
+                # Identify and return the .db file path
+
+        db_file_path = ""
+        for file in os.listdir(output_dp):
+            if file.endswith(".db"):
+                db_file_path = os.path.join(output_dp, file)
+                break
+        new_file_path = os.path.join(output_dp, "chembl_sqlite.db")
+        os.rename(db_file_path, new_file_path)
+        self.db_file_path = new_file_path
+
+    def db_query(self, query, output_file):
+        print(f"\rQuerying {output_file}, please be patient, this may take a while...", end='', flush=True)
+        conn = sqlite3.connect(self.db_file_path)
+        cursor = conn.cursor()
+        cursor.execute(query)
+        columns = [description[0] for description in cursor.description]
+        rows = cursor.fetchall()
+        print(f"\rwriting {output_file}...", end='', flush=True)
+        with open(output_file, "w", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file, delimiter='\t')  # 指定分隔符为'\t'
+            writer.writerow(columns)  # 写入列名
+            writer.writerows(rows)  # 写入数据
+        conn.close()
+
+    def form_data(self, output_dp):
+        # get gpcr uniprot ids
+        with open(join(output_dp, '../uniprot/gpcr_entries.json'), 'r', encoding='utf-8') as fd:
+            gpcr_entries = json.load(fd)
+        gpcr_uniprot_ids = set([sys.intern(x) for x in gpcr_entries.keys()])
+        print(f"Loaded {len(gpcr_uniprot_ids)} GPCR UniProt IDs")
+
+        # 读取映射字典
+        cinfo = pd.read_csv(join(output_dp, 'chembl_cinfo.tsv'), sep='\t')
+        cdict = {v[0]: v[1] for v in cinfo[['ChEMBL ID', 'InChIKey']].values}
+        tinfo = pd.read_csv(join(output_dp, 'chembl_tinfo.tsv'), sep='\t')
+        tdict = {v[0]: v[1] for v in tinfo[['target_chembl_id', 'protein_accession']].values}
+        # release the RAM
+        del cinfo; gc.collect()
+        del tinfo; gc.collect()
+
+        # 处理CPI数据
+        print(f"\rProcessing CPI data...", end='', flush=True)
         start = timer()
         nb_entries = 0
-        for event, entry in ET.iterparse(xml_fd, events=('start', 'end')):
-            if entry.tag == "entry" and event == "end" and len(list(entry)) > 2:
-                nb_entries += 1
-                if nb_entries % 5 == 0:
-                    speed = nb_entries / (timer() - start)
-                    msg = prc_sym + "Processed (%d) entries.  Speed: (%1.5f) entries/second" % (nb_entries, speed)
-                    print("\r" + msg, end="", flush=True)
+        chunksize = 10000
+        cpi_chunks = []
+        
+        for chunk in pd.read_csv(join(output_dp, 'chembl_cpi.tsv'), sep='\t', chunksize=chunksize, on_bad_lines='skip'):
+            # 添加规范化列
+            chunk['compound_inchikey'] = chunk['compound_chembl_id'].map(cdict)
+            chunk['target_uniprot_id'] = chunk['target_chembl_id'].map(tdict)
+            
+            # 使用sys.intern过滤GPCR数据
+            chunk['target_uniprot_id_intern'] = chunk['target_uniprot_id'].apply(lambda x: sys.intern(x) if pd.notna(x) else x)
+            chunk_filtered = chunk[chunk['target_uniprot_id_intern'].isin(gpcr_uniprot_ids)]
+            
+            # 删除临时列
+            chunk_filtered = chunk_filtered.drop('target_uniprot_id_intern', axis=1)
+            
+            if not chunk_filtered.empty:
+                cpi_chunks.append(chunk_filtered)
+            
+            nb_entries += len(chunk)
+            if nb_entries % 10000 == 0:
+                speed = nb_entries / (timer() - start)
+                msg = prc_sym + "Processed (%d) CPI entries.  Speed: (%1.2f) entries/second" % (
+                    nb_entries, speed)
+                print("\r" + msg, end="", flush=True)
 
-                id_elem = entry.find("identifier")
-                if len(id_elem) >= 1:
-                    db_name = id_elem[0].attrib["db"]
-                    if db_name == "Uniprot/SWISSPROT":
-                        entry_id = id_elem[0].attrib["id"]
-                        entry_data = self.__parse_hpa_xml_entry(entry)
-                        # export antibody data
-                        for _, ab, ag in entry_data["ab"]:
-                            ag = ag if ag is not None else "-"
-                            ab_data_fd.write("%s\t%s\t%s\n" % (ab, entry_id, ag))
-                        # export tissue data
-                        for context, ts, level in entry_data["tissue"]:
-                            if level is not None:
-                                if context == "TISSUE":
-                                    tissue_exp_fd.write("%s\t%s\t%s\n" % (entry_id, ts, level))
-                                else:
-                                    cl_exp_fd.write("%s\t%s\t%s\n" % (entry_id, ts, level))
-                        # export rna data
-                        for rna_data in entry_data["rna"]:
-                            if len(rna_data) == 3:
-                                _, cl, level = rna_data
-                                tissue_exp_fd.write("%s\t%s\t%s\n" % (entry_id, cl, level))
-                            if len(rna_data) == 4:
-                                _, cl, level, organ = rna_data
-                                cl_exp_fd.write("%s\t%s\t%s\t%s\n" % (entry_id, cl, organ, level))
-                entry.clear()
+        # 合并并保存CPI数据
+        if cpi_chunks:
+            cpi_final = pd.concat(cpi_chunks, ignore_index=True)
+            # 重新排列列顺序，将规范化列放在对应ID后面
+            cols = list(cpi_final.columns)
+            # 找到compound_chembl_id的位置，在其后插入compound_inchikey
+            compound_idx = cols.index('compound_chembl_id')
+            cols.insert(compound_idx + 1, cols.pop(cols.index('compound_inchikey')))
+            # 找到target_chembl_id的位置，在其后插入target_uniprot_id
+            target_idx = cols.index('target_chembl_id')
+            cols.insert(target_idx + 1, cols.pop(cols.index('target_uniprot_id')))
+            cpi_final = cpi_final[cols]
+            
+            cpi_final.to_csv(join(output_dp, 'chembl_cpi.tsv'), sep='\t', index=False)
+            print(f"\rSaved {len(cpi_final)} filtered CPI entries", flush=True)
+        else:
+            print(f"\rNo GPCR CPI entries found", flush=True)
 
+        # 处理DTI数据
+        print(f"\rProcessing DTI data...", end='', flush=True)
+        start = timer()
+        nb_entries = 0
+        dti_chunks = []
+        
+        for chunk in pd.read_csv(join(output_dp, 'chembl_dti.tsv'), sep='\t', chunksize=chunksize, on_bad_lines='skip'):
+            # 添加规范化列
+            chunk['compound_inchikey'] = chunk['compound_chembl_id'].map(cdict)
+            chunk['target_uniprot_id'] = chunk['target_chembl_id'].map(tdict)
+            
+            # 使用sys.intern过滤GPCR数据
+            chunk['target_uniprot_id_intern'] = chunk['target_uniprot_id'].apply(lambda x: sys.intern(x) if pd.notna(x) else x)
+            chunk_filtered = chunk[chunk['target_uniprot_id_intern'].isin(gpcr_uniprot_ids)]
+            
+            # 删除临时列
+            chunk_filtered = chunk_filtered.drop('target_uniprot_id_intern', axis=1)
+            
+            if not chunk_filtered.empty:
+                dti_chunks.append(chunk_filtered)
+            
+            nb_entries += len(chunk)
+            if nb_entries % 10000 == 0:
+                speed = nb_entries / (timer() - start)
+                msg = prc_sym + "Processed (%d) DTI entries.  Speed: (%1.2f) entries/second" % (
+                    nb_entries, speed)
+                print("\r" + msg, end="", flush=True)
+
+        # 合并并保存DTI数据
+        if dti_chunks:
+            dti_final = pd.concat(dti_chunks, ignore_index=True)
+            # 重新排列列顺序，将规范化列放在对应ID后面
+            cols = list(dti_final.columns)
+            # 找到compound_chembl_id的位置，在其后插入compound_inchikey
+            compound_idx = cols.index('compound_chembl_id')
+            cols.insert(compound_idx + 1, cols.pop(cols.index('compound_inchikey')))
+            # 找到target_chembl_id的位置，在其后插入target_uniprot_id
+            target_idx = cols.index('target_chembl_id')
+            cols.insert(target_idx + 1, cols.pop(cols.index('target_uniprot_id')))
+            dti_final = dti_final[cols]
+            
+            dti_final.to_csv(join(output_dp, 'chembl_dti.tsv'), sep='\t', index=False)
+            print(f"\rSaved {len(dti_final)} filtered DTI entries", flush=True)
+        else:
+            print(f"\rNo GPCR DTI entries found", flush=True)
+
+        print(done_sym + " GPCR filtering and normalization completed.")
+
+    def parse_chem_db(self, source_dp, output_dp):
+        """
+        Parse ChEMBL files
+
+        Parameters
+        ----------
+        source_dp : str
+            The path to the source directory
+        output_dp : str
+            The path to the output directory
+        """
+        print_section_header(
+            "Parsing ChEMBL files (%s)" %
+            (bcolors.OKGREEN + source_dp + '/chembl_sqlite.tar.gz' + bcolors.ENDC)
+        )
+        start = timer()
+        nb_entries = 0
+
+        input_fp = join(source_dp, 'chembl_sqlite.tar.gz')
+        print(f"\runpacking {input_fp}...", end='', flush=True)
+        self.db_file_path = join(output_dp, "chembl_sqlite.db")
+        if not os.path.exists(self.db_file_path):
+            self.unpack_db(input_fp, output_dp)
+        nb_entries += 1
+        self.db_query(self.query_cpi, os.path.join(output_dp, 'chembl_cpi.tsv')) # 化合物-蛋白质互作
+        nb_entries += 1
+        self.db_query(self.query_dti, os.path.join(output_dp, 'chembl_dti.tsv')) # 药物-靶标互作
+        nb_entries += 1
+        self.db_query(self.query_cinfo, os.path.join(output_dp, 'chembl_cinfo.tsv')) # 化合物检索信息
+        nb_entries += 1
+        self.db_query(self.query_tinfo, os.path.join(output_dp, 'chembl_tinfo.tsv')) # 蛋白质检索信息
+        nb_entries += 1
+        print(done_sym + "Processed (%d) files. Took %1.2f Seconds." % (nb_entries, timer() - start), flush=True)
+        self.form_data(output_dp)
+
+
+
+# ...existing code...
+
+class IUPHARParser:
+    """
+    IUPHAR database parser for GPCR interactions
+    """
+    def __init__(self):
+        """
+        Initialize IUPHAR parser class instance
+        """
+        self._filenames = [
+            'iuphar_cpi.tsv',
+            'iuphar_cinfo.tsv'
+        ]
+        self.filepath = ""
+        self.output_dp = ""
+
+    @property
+    def filenames(self):
+        """
+        Get IUPHAR filenames
+
+        Returns
+        -------
+        filenames : list
+            the names of the IUPHAR output files
+        """
+        return self._filenames
+
+    def parse(self, source_dp, output_dp):
+        """
+        Parse IUPHAR GPCR interactions file
+
+        Parameters
+        ----------
+        source_dp : str
+            The path to the source directory
+        output_dp : str
+            The path to the output directory
+        """
+        self.filepath = join(source_dp, 'gpcr_interactions.csv')
+        self.output_dp = output_dp
+        
+        print_section_header(
+            "Parsing IUPHAR GPCR interactions file (%s)" %
+            (bcolors.OKGREEN + self.filepath + bcolors.ENDC)
+        )
+        start = timer()
+        
+        # Read the data file
+        try:
+            # Read the file, skipping comment lines and handling encoding
+            df = pd.read_csv(
+                self.filepath,
+                quotechar='"',
+                encoding='utf-8',
+                comment='#',
+                engine='python'  # 用 python 引擎能更好处理复杂引号
+            )
+            
+        except Exception as e:
+            print(f"Error reading file: {e}")
+            return
+        
+        # Filter for GPCR targets by loading GPCR UniProt IDs
+        gpcr_uniprot_ids = set()
+        try:
+            gpcr_file = join(output_dp, '../uniprot/gpcr_entries.json')
+            if os.path.exists(gpcr_file):
+                with open(gpcr_file, 'r', encoding='utf-8') as fd:
+                    gpcr_entries = json.load(fd)
+                gpcr_uniprot_ids = set([sys.intern(x) for x in gpcr_entries.keys()])
+            else:
+                print("Warning: GPCR entries file not found, processing all targets")
+        except Exception as e:
+            print(f"Warning: Could not load GPCR filter: {e}")
+        
+        # Process CPI data
+        print("Processing compound-protein interaction data...")
+        cpi_data = []
+        
+        processed_count = 0
+        filtered_count = 0
+        
+        for idx, row in df.iterrows():
+            processed_count += 1
+            
+            # Extract target information
+            target_uniprot_ids = str(row.get('Target UniProt ID', None))
+            
+            # Extract ligand information
+            ligand_id = row.get('Ligand ID', None)
+            
+            # Extract interaction information
+            interaction_type = row.get('Type', None)
+            action = row.get('Action', None)
+            # action_comment = row.get('Action comment', None).strip()
+            # selectivity = row.get('Selectivity', None).strip()
+            endogenous = row.get('Endogenous', None)
+            primary_target = row.get('Primary Target', None)
+            approved = row.get('Approved', None)
+            
+            # Extract affinity information
+            affinity_units = row.get('Affinity Units', None)
+            affinity_high = row.get('Affinity High', None)
+            affinity_median = row.get('Affinity Median', None)
+            affinity_low = row.get('Affinity Low', None)
+            original_affinity_units = row.get('Original Affinity Units', None)
+            original_affinity_relation = row.get('Original Affinity Relation', None)
+            original_affinity_low = row.get('Original Affinity Low nm', None)
+            original_affinity_high = row.get('Original Affinity High nm', None)
+            original_affinity_median = row.get('Original Affinity Median nm', None)
+
+            # concentration_range = row.get('concentration Range', '').strip()
+            
+            # Extract additional information
+            pubmed_id = row.get('PubMed ID', '')
+            
+
+            for target_uniprot_id in target_uniprot_ids.split('|'):
+                # Filter for GPCR targets if filter is available
+                if gpcr_uniprot_ids and target_uniprot_id:
+                    target_uniprot_intern = sys.intern(target_uniprot_id) if target_uniprot_id else None
+                    if target_uniprot_intern not in gpcr_uniprot_ids:
+                        continue           
+                filtered_count += 1
+                # Create CPI entry
+                cpi_entry = {
+                    'target_uniprot_id': target_uniprot_id,
+                    'ligand_id': ligand_id,
+                    'interaction_type': interaction_type,
+                    'action': action,
+                    'endogenous': endogenous,
+                    'primary_target': primary_target,
+                    'approved': approved,
+                    'affinity_units': affinity_units,
+                    'affinity_high': affinity_high,
+                    'affinity_median': affinity_median,
+                    'affinity_low': affinity_low,
+                    'original_affinity_units': original_affinity_units,
+                    'original_affinity_relation': original_affinity_relation,
+                    'original_affinity_low': original_affinity_low,
+                    'original_affinity_high': original_affinity_high,
+                    'original_affinity_median': original_affinity_median,
+                    'pubmed_id': pubmed_id
+                }
+                cpi_data.append(cpi_entry)
+            
+            # Progress update
+            if processed_count % 1000 == 0:
+                speed = processed_count / (timer() - start)
+                msg = prc_sym + "Processed (%d) entries, filtered (%d) GPCR entries. Speed: (%1.2f) entries/second" % (
+                    processed_count, filtered_count, speed)
+                print("\r" + msg, end="", flush=True)
+        
+        print(f"\rProcessed {processed_count} total entries, {filtered_count} GPCR entries")
+        
+        # Convert to DataFrame and save CPI data
+        cpi_df = None
+        if cpi_data:
+            cpi_df = pd.DataFrame(cpi_data)
+            # cpi_df = regular_type(cpi_df)  # Apply type regularization
+            
+            # Save CPI data
+            cpi_output_file = join(output_dp, 'iuphar_cpi.tsv')
+            cpi_df.to_csv(cpi_output_file, sep='\t', index=False, encoding='utf-8')
+            print(f"Saved {len(cpi_df)} CPI entries to {cpi_output_file}")
+        else:
+            print("No CPI data to save")
+        
+        # Process ligand lists to create compound info
+        print("Processing ligand lists for compound information...")
+        self._process_ligand_list(source_dp, output_dp, cpi_df)
+        
         print(done_sym + " Took %1.2f Seconds." % (timer() - start), flush=True)
-        ab_data_fd.close()
-        tissue_exp_fd.close()
-        cl_exp_fd.close()
 
+    def _process_ligand_list(self, source_dp, output_dp, cpi_df):
+        """
+        Process ligand_list.csv to create compound information file
+
+        Parameters
+        ----------
+        source_dp : str
+            The path to the source directory
+        output_dp : str
+            The path to the output directory
+        cpi_df : pandas.DataFrame
+            The CPI dataframe to extract unique ligand IDs from
+        """
+        ligand_list_file = join(source_dp, 'ligand_list.csv')
+        
+        # Extract unique ligand IDs from CPI data
+        unique_ligand_ids = set()
+        if cpi_df is not None and not cpi_df.empty:
+            unique_ligand_ids = set(cpi_df['ligand_id'].dropna().astype(str).unique())
+        else:
+            print("No CPI data available, processing all ligands")
+        
+        try:
+            # Read ligand lists file
+            ligand_df = pd.read_csv(
+                ligand_list_file,
+                quotechar='"',
+                encoding='utf-8',
+                comment='#',
+                engine='python'
+            )
+            
+            # Filter for ligands that appear in CPI data (if CPI data exists)
+            if unique_ligand_ids:
+                ligand_df['Ligand ID'] = ligand_df['Ligand ID'].astype(str)
+                filtered_ligand_df = ligand_df[ligand_df['Ligand ID'].isin(unique_ligand_ids)]
+            else:
+                filtered_ligand_df = ligand_df
+            
+            if filtered_ligand_df.empty:
+                print("No ligands to process for compound information")
+                return
+            
+            # Create compound info data following link_head format
+            cinfo_data = []
+            
+            for idx, row in filtered_ligand_df.iterrows():
+                # Map IUPHAR columns to link_head format
+                cinfo_entry = {
+                    'InChIKey': row.get('InChIKey', None),
+                    'SMILES': row.get('SMILES', None),
+                    'Name': row.get('Name', None),
+                    'InChI': row.get('InChI', None),
+                    'CAS Number': None,  # Not available in IUPHAR data
+                    'DrugBank ID': None,  # Not available in IUPHAR data
+                    'KEGG Compound ID': None,  # Not available in IUPHAR data
+                    'KEGG Drug ID': None,  # Not available in IUPHAR data
+                    'PubChem Compound ID': row.get('PubChem CID', None),
+                    'PubChem Substance ID': row.get('PubChem SID', None),
+                    'ChEBI ID': None,  # Not available in IUPHAR data
+                    'ChEMBL ID': row.get('ChEMBL ID', None),
+                    'HET ID': None,  # Not available in IUPHAR data
+                    'ChemSpider ID': None,  # Not available in IUPHAR data
+                    'BindingDB ID': None,  # Not available in IUPHAR data
+                    # Additional IUPHAR-specific fields
+                    'Ligand ID': row.get('Ligand ID', None),
+                    'Species': row.get('Species', None),
+                    'Type': row.get('Type', None),
+                    'Approved': row.get('Approved', None),
+                    'IUPAC name': row.get('IUPAC name', None),
+                }
+                cinfo_data.append(cinfo_entry)
+            
+            # Create DataFrame and save
+            if cinfo_data:
+                cinfo_df = pd.DataFrame(cinfo_data)
+                
+                # Save compound info data
+                cinfo_output_file = join(output_dp, 'iuphar_cinfo.tsv')
+                cinfo_df.to_csv(cinfo_output_file, sep='\t', index=False, encoding='utf-8')
+            else:
+                print("No compound info data to save")
+        
+            
+        except Exception as e:
+            print(f"Error processing ligand_list.csv: {e}")
+            return
+        # Add InChIKey mapping to CPI data
+
+        ligand_inchikey_map = dict(zip(cinfo_df['Ligand ID'], cinfo_df['InChIKey']))
+    
+        # Add compound_inchikey column to CPI data
+        cpi_df['compound_inchikey'] = cpi_df['ligand_id'].map(ligand_inchikey_map)
+        
+        # Reorder columns to put compound_inchikey after ligand_id
+        cols = list(cpi_df.columns)
+        ligand_id_idx = cols.index('ligand_id')
+        cols.insert(ligand_id_idx + 1, cols.pop(cols.index('compound_inchikey')))
+        cpi_df = cpi_df[cols]
+        
+        # Save updated CPI data
+        cpi_output_file = join(output_dp, 'iuphar_cpi.tsv')
+        cpi_df.to_csv(cpi_output_file, sep='\t', index=False, encoding='utf-8')
