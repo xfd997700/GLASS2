@@ -5,4 +5,5 @@
 *.pyc
 *.csv
 parsers_bk.py
+src/__pycache__
 __pycache__

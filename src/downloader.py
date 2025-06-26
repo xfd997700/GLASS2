@@ -128,4 +128,41 @@ def download_pdsp_data(sources_dp, srcs_cp):
         raise FileNotFoundError("File KiDatabase.csv not found in manually_prepared folder,\
                                 please check manually_prepared/README.md to prepare the data")
     print_bold_line()
+
+def download_unichem_data(sources_dp, srcs_cp):
+    """ Download unichem database files
+    Parameters
+    ----------
+    sources_dp : str
+        the sources directory path
+    srcs_cp : RawConfigParser
+        source urls config parser
+    """
+    os.makedirs(sources_dp, exist_ok=True)
+    print_section_header("Downloading UniChem data files")
+    reference = join(sources_dp, "reference.tsv.gz")
+    download_file_md5_check(srcs_cp["unichem"]["reference"], reference)
+    source = join(sources_dp, "source.tsv.gz")
+    download_file_md5_check(srcs_cp["unichem"]["source"], source)
+    structure = join(sources_dp, "structure.tsv.gz")
+    download_file_md5_check(srcs_cp["unichem"]["structure"], structure)
+    print_bold_line()
+
+
+def download_glass_data(sources_dp, srcs_cp):
+    """ Download GLASS database files
+    Parameters
+    ----------
+    sources_dp : str
+        the sources directory path
+    srcs_cp : RawConfigParser
+        source urls config parser
+    """
+    os.makedirs(sources_dp, exist_ok=True)
+    print_section_header("Downloading GLASS data files")
+    cpi_fp = join(sources_dp, "cpi.csv")
+    download_file_md5_check(srcs_cp["glass"]["cpi"], cpi_fp)
+    ligands_fp = join(sources_dp, "ligands.tsv")
+    download_file_md5_check(srcs_cp["glass"]["ligands"], ligands_fp)
+
     print_bold_line()
