@@ -40,12 +40,31 @@ download_pdsp_data(pdsp_db, config)
 unichem_db = os.path.join(sources_dp, 'unichem/')
 # download_unichem_data(unichem_db, config)
 
+pubchem_db = os.path.join(sources_dp, 'pubchem/')
+# download_pubchem_data(pubchem_db, config)
+
 llm_db = os.path.join(sources_dp, 'llm/')
+download_llm_data(llm_db, config)
 
 glass_db = os.path.join(sources_dp, 'glass/')
-download_glass_data(glass_db, config)
+# download_glass_data(glass_db, config)
 
 #%%
+# ----------------------------------------------------------------------
+# processing pubchem entries file
+pubchem_parser = PubChemParser()
+pubchem_dp = join(processed_dp, 'pubchem')
+os.makedirs(pubchem_dp, exist_ok=True)
+pubchem_output_fps = [join(pubchem_dp, fn) for fn in pubchem_parser.filenames]
+invalid_md5 = bool(sum([not file_has_valid_md5(ofp) for ofp in pubchem_output_fps]))
+
+if invalid_md5:
+    pubchem_parser.parse(pubchem_db, pubchem_dp)
+    for ofp in pubchem_output_fps:
+        export_file_md5(ofp)
+else:
+    print(inf_sym + "PubChem processed files exists with valid md5 hashes %s. >>> Parsing not required." % done_sym)
+
 # ----------------------------------------------------------------------
 # processing uniprot entries file
 uniprot_parser = UniProtGPCRParser()
@@ -196,7 +215,7 @@ result = merge_all_cpi_data(output_dp, compile_dp)
 print(inf_sym + "Merged CPI data: %s" % done_sym)
 merged_cinfo = merge_all_compound_info(processed_dp)
 
-unique_inchikeys = set(sys.intern(x) for x in result['full_cpi']['compound_inchikey'].unique())
+unique_inchikeys = set(sys.intern(x) for x in result['full']['compound_inchikey'].unique())
 filtered_cinfo = merged_cinfo[merged_cinfo['InChIKey'].isin(unique_inchikeys)].reset_index(drop=True)
 filtered_cinfo.to_csv(join(compile_dp, 'ligands.tsv'), sep='\t', index=False, encoding='utf-8')
 
@@ -219,9 +238,42 @@ else:
     print(fail_sym + f"Uniprot GPCR entries file not found at {uniprot_src} >>> Skipping copy")
 fetch_xref(filtered_cinfo, compile_dp)
 
+
+# %%
+import json
+import pandas as pd
+from os.path import join, isfile
+
+compile_dp = 'database/glass2/'
+with open('database/glass2/inchikey2uci.json', 'r', encoding='utf-8') as f:
+    inchikey2uci = json.load(f)
+    # Convert inchikey2uci to filtered_cinfo with ['InChIKey', 'UCI'] columns
+filtered_cinfo = pd.DataFrame([
+    {'InChIKey': k, 'UCI': v} for k, v in inchikey2uci.items()
+])
+
+result = {
+    'cls': pd.read_csv(join(compile_dp, 'glass2_cls.csv'), encoding='utf-8'),
+    'reg_act': pd.read_csv(join(compile_dp, 'glass2_reg_act.csv'), encoding='utf-8'),
+    'reg_inact': pd.read_csv(join(compile_dp, 'glass2_reg_inact.csv'), encoding='utf-8'),
+    'full': pd.read_csv(join(compile_dp, 'glass2_full.tsv'), sep='\t', encoding='utf-8')
+}
+
+
 print('adding uci to cpi data...')
 for k, df in result.items():
-    if isinstance(df, pd.DataFrame) and 'standard_inchikey' in df.columns:
-        result[k] = df.merge(filtered_cinfo[['InChIKey', 'UCI']], left_on='standard_inchikey', right_on='InChIKey', how='left').rename(columns={'UCI': 'uci'})
+    if isinstance(df, pd.DataFrame) and 'compound_inchikey' in df.columns:
+        result[k] = df.merge(filtered_cinfo[['InChIKey', 'UCI']], left_on='compound_inchikey', right_on='InChIKey', how='left').rename(columns={'UCI': 'uci'})
+        cols = list(result[k].columns)
+        if 'uci' in cols:
+            cols.insert(1, cols.pop(cols.index('uci')))
+            result[k] = result[k][cols]
+        if 'InChIKey' in result[k].columns:
+            result[k] = result[k].drop(columns=['InChIKey'])
+        
+result['cls'].to_csv(join(compile_dp, 'glass2_cls.csv'), index=False, encoding='utf-8')
+result['reg_act'].to_csv(join(compile_dp, 'glass2_reg_act.csv'), index=False, encoding='utf-8')
+result['reg_inact'].to_csv(join(compile_dp, 'glass2_reg_inact.csv'), index=False, encoding='utf-8')
+result['full'].to_csv(join(compile_dp, 'glass2_full.tsv'), sep='\t', index=False, encoding='utf-8')
 
 # %%

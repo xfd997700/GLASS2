@@ -7,3 +7,5 @@
 parsers_bk.py
 src/__pycache__
 __pycache__
+*.jsonl
+*.json

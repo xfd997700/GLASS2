@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+from collections import defaultdict
+import gzip
 import re
 import sys
 from turtle import pos
@@ -16,7 +18,7 @@ from .extras import *
 from timeit import default_timer as timer
 import xml.etree.ElementTree as ET
 from zipfile import ZipFile
-
+from ete3 import NCBITaxa
 import pandas as pd
 import tarfile
 import os
@@ -137,7 +139,8 @@ class UniProtGPCRParser:
             "pubmed_ids": [],
             "seq_ranges": [],
             "seq_annotations": [],
-            "pdb_ids": []
+            "pdb_ids": [],
+            "gene_ids": []
         }
         
         entry_dictionary = dict()
@@ -198,6 +201,10 @@ class UniProtGPCRParser:
             pdbsum_matches = re.findall(r'PDBsum;\s*([^;]+)', dr_content)
             for match in pdbsum_matches:
                 entry_data["pdb_ids"].append(match.strip())
+            geneid_matches = re.findall(r'GeneID;\s*([^;]+)', dr_content)
+            for match in geneid_matches:
+                entry_data["gene_ids"].append(match.strip())
+
 
         # Extract PubMed IDs from RX section
         if "RX" in entry_dictionary:
@@ -396,6 +403,12 @@ class UniProtGPCRParser:
 
         # Parse FASTA file and merge with text data
         all_entries = self.__parse_gpcr_fasta(fasta_filepath, all_entries)
+        ncbi = NCBITaxa()
+        for k, v in all_entries.items():
+            if v['species'] == "":
+                taxid = int(v['taxon_id'])
+                # 获取物种学名
+                v['species'] = ncbi.get_taxid_translator([taxid])[taxid]
 
         # Save to JSON file
         output_file = join(output_dp, self._filename)
@@ -1943,201 +1956,631 @@ class PDSPParser:
         print(done_sym + " Took %1.2f Seconds." % (timer() - start), flush=True)
 
 
-class LLMParser:
+class PubChemParser:
     """
-    LLM database parser
+    PubChem database parser
     """
     def __init__(self):
         self._filenames = [
-            'llm_cpi.tsv',
-            'llm_cinfo.tsv'
-        ]
-        self.filepath = ""
-        self.output_dp = ""
+            'reference.txt.gz']
 
     @property
     def filenames(self):
         return self._filenames
 
+    
     def parse(self, source_dp, output_dp):
         print_section_header(
-            "Parsing LLM files"
+            "Parsing PubChem files (%s)" %
+            (bcolors.OKGREEN + source_dp + bcolors.ENDC)
+        )
+        start = timer()
+        nb_entries = 0
+        with gzip.open(join(output_dp, 'reference.txt.gz'), 'wb') as f_out:
+            for f in os.listdir(source_dp):
+                if f.endswith('.ttl.gz'):
+                    with gzip.open(join(source_dp, f), 'rt') as fd:
+                        for line in fd:
+                            if line.startswith('@'):
+                                continue
+                            row = line.strip().split("\t")
+                            if len(row) == 3:
+                                cid = row[2].split(':')[-1].replace(' .', '')
+                                inchikey = row[0].split(':')[-1]
+                                f_out.write(f'{cid}\t{inchikey}\n'.encode())
+                                nb_entries += 1
+                                if nb_entries % 1000 == 0:
+                                    speed = nb_entries / (timer() - start)
+                                    msg = prc_sym + "Processed (%d) pubchem CID-InChIKey references.  Speed: (%1.5f) entries/second" % (
+                                        nb_entries, speed)
+                                    print("\r" + msg, end="", flush=True)
+        print(done_sym + "Processed (%d) pubchem CID-InChIKey references. Took %1.2f Seconds." % (nb_entries, timer() - start),
+              flush=True)
+
+
+
+class LLMParser:
+    """
+    LLM text-mining parser
+    输入：
+        database/sources/llm/mesh_supp.xml
+        database/sources/llm/cid2mesh.txt
+        database/sources/llm/llm.jsonl
+        join(output_dp, "../pubchem/reference.txt.gz")   # CID -> InChIKey
+        join(output_dp, "../uniprot/gpcr_entries.json")  # UniProt GPCR entries
+        join(source_dp, "../pubchem/") 下： CID-IUPAC.gz / CID-SMILES.gz / CID-TITLE.gz
+    输出：
+        llm_cpi.tsv
+        llm_cinfo.tsv
+    """
+
+    def __init__(self):
+        self._filenames = ['llm_cpi.tsv', 'llm_cinfo.tsv']
+        self.filepath = ""
+        self.output_dp = ""
+
+        # chemical maps
+        self.term_to_mesh = {}             # term(lower) -> MeSH UI
+        self.mesh_to_cids = {}             # MeSH UI -> [CID...]
+        self.cid_to_inchikey = {}          # CID -> InChIKey
+        self.mesh_to_inchikeys = {}        # MeSH UI -> [InChIKey...]
+        self.mesh_official_name = {}       # MeSH UI -> 官方名称
+        self.chem_set = set()              # all CIDs used (string)
+
+        # gene map
+        self.gene_to_uniprot = {}          # gene_id -> UniProt
+
+    @property
+    def filenames(self):
+        return self._filenames
+
+    # ---------------------------
+    # Step 1: Build MeSH & InChIKey maps
+    # ---------------------------
+    def _build_mesh_map(self, source_dp, output_dp):
+        """
+        读取 mesh_supp.xml 和 cid2mesh.txt，构建：
+          - self.term_to_mesh: 术语 -> MeSH
+          - self.mesh_official_name: MeSH -> 官方名称（优先 SupplementalRecordName/String，回退 RecordPreferredTerm）
+          - self.mesh_to_cids: MeSH -> [CID...]
+          - self.cid_to_inchikey: CID -> InChIKey (过滤 ../pubchem/reference.txt.gz)
+          - self.mesh_to_inchikeys: MeSH -> [InChIKey...]
+        """
+        # 1) term -> MeSH & 官方名称
+        mesh_xml = join(source_dp, 'mesh_supp.xml')
+        print_section_header(
+            "Building MeSH term & official name maps (%s)" %
+            (bcolors.OKGREEN + mesh_xml + bcolors.ENDC)
+        )
+        start = timer()
+        nb_entries = 0
+
+        try:
+            tree = ET.parse(mesh_xml)
+            root = tree.getroot()
+
+            for record in root.findall("SupplementalRecord"):
+                mesh_id = record.findtext("SupplementalRecordUI")
+                if not mesh_id:
+                    continue
+                mesh_id = sys.intern(mesh_id.strip().upper())
+
+                # 官方名称：优先 SupplementalRecordName/String
+                official = None
+                srn = record.find("SupplementalRecordName")
+                if srn is not None:
+                    official = srn.findtext("String")
+                if official:
+                    official = sys.intern(official.strip())
+                else:
+                    # 回退：RecordPreferredTermYN="Y" 的 Term 的 String
+                    pref_term = record.find('.//Term[@RecordPreferredTermYN="Y"]/String')
+                    if pref_term is not None and pref_term.text:
+                        official = sys.intern(pref_term.text.strip())
+                if official:
+                    self.mesh_official_name[mesh_id] = official
+
+                # 所有 Term 名称（包含记录首选名与别名）
+                for term in record.findall(".//Term"):
+                    term_name = term.findtext("String")
+                    if term_name:
+                        key = sys.intern(term_name.strip().lower())
+                        self.term_to_mesh[key] = mesh_id
+
+                nb_entries += 1
+                if nb_entries % 2000 == 0:
+                    speed = nb_entries / (timer() - start)
+                    msg = prc_sym + "Indexed (%d) MeSH records.  Speed: (%1.2f) recs/second" % (nb_entries, speed)
+                    print("\r" + msg, end="", flush=True)
+
+            print(done_sym + " Took %1.2f Seconds. Terms: %d, Official names: %d"
+                  % (timer() - start, len(self.term_to_mesh), len(self.mesh_official_name)), flush=True)
+
+        except Exception as e:
+            print(f"Error parsing {mesh_xml}: {e}")
+            return
+
+        # 2) MeSH -> CIDs  (via PubChem CID-MeSH terms)
+        cid_mesh_fp = join(source_dp, 'cid2mesh.txt')
+        print_section_header(
+            "Linking CID to MeSH via terms (%s)" %
+            (bcolors.OKGREEN + cid_mesh_fp + bcolors.ENDC)
+        )
+        start = timer()
+        nb_entries = 0
+
+        self.mesh_to_cids.clear()
+        self.chem_set.clear()
+
+        with open(cid_mesh_fp, 'r', encoding='utf-8') as fd:
+            for line in fd:
+                parts = line.rstrip("\n").split("\t")
+                if not parts or len(parts) < 2:
+                    continue
+                cid = parts[0].strip()
+                if not cid:
+                    continue
+                cid = sys.intern(cid.replace(',', '').strip())  # 保守：去逗号
+                terms = [t.strip().lower() for t in parts[1:] if t.strip()]
+
+                # 用术语反查 MeSH
+                for t in terms:
+                    mesh_id = self.term_to_mesh.get(t)
+                    if mesh_id:
+                        self.mesh_to_cids.setdefault(mesh_id, []).append(cid)
+                        self.chem_set.add(cid)
+
+                nb_entries += 1
+                if nb_entries % 10000 == 0:
+                    speed = nb_entries / (timer() - start)
+                    msg = prc_sym + "Scanned (%d) CID-MeSH lines.  Speed: (%1.2f) lines/second" % (nb_entries, speed)
+                    print("\r" + msg, end="", flush=True)
+
+        # 去重 & 规范排序
+        for mid, cids in list(self.mesh_to_cids.items()):
+            uniq = sorted(set(cids), key=lambda x: int(x) if x.isdigit() else x)
+            self.mesh_to_cids[mid] = uniq
+
+        print(done_sym + " Took %1.2f Seconds. MeSH with CIDs: %d, Unique CIDs: %d"
+              % (timer() - start, len(self.mesh_to_cids), len(self.chem_set)),
+              flush=True)
+
+        # # 3) 过滤读取 CID -> InChIKey
+        # ref_fp = join(output_dp, '../pubchem/reference.txt.gz')
+        # print_section_header(
+        #     "Filtering PubChem CID→InChIKey (%s)" %
+        #     (bcolors.OKGREEN + ref_fp + bcolors.ENDC)
+        # )
+        # start = timer()
+        # nb_entries = 0
+        # self.cid_to_inchikey.clear()
+
+        # try:
+        #     with gzip.open(ref_fp, 'rt', encoding='utf-8') as f:
+        #         for line in f:
+        #             cid_raw, inchikey = line.strip().split('\t')
+        #             cid = sys.intern(cid_raw.replace('CID', '').replace(',', '').strip())
+        #             if cid in self.chem_set:
+        #                 self.cid_to_inchikey[cid] = inchikey
+        #                 nb_entries += 1
+        #                 if nb_entries % 1000 == 0:
+        #                     speed = nb_entries / (timer() - start)
+        #                     msg = prc_sym + "Filtered (%d) compounds.  Speed: (%1.5f) compounds/second" % (nb_entries, speed)
+        #                     print("\r" + msg, end="", flush=True)
+        #     print(done_sym + " Took %1.2f Seconds. Kept %d CIDs"
+        #           % (timer() - start, len(self.cid_to_inchikey)), flush=True)
+        # except Exception as e:
+        #     print(f"Error reading {ref_fp}: {e}")
+        #     return
+
+        # # 4) 聚合得到 MeSH -> [InChIKey]
+        # self.mesh_to_inchikeys.clear()
+        # for mid, cids in self.mesh_to_cids.items():
+        #     keys = [self.cid_to_inchikey[c] for c in cids if c in self.cid_to_inchikey]
+        #     if keys:
+        #         self.mesh_to_inchikeys[mid] = sorted(set(keys))
+
+        # print("Built MeSH→[InChIKey] for %d MeSH IDs" % len(self.mesh_to_inchikeys))
+
+    # ---------------------------
+    # Step 2: Build gene_id -> UniProt map
+    # ---------------------------
+    def _build_gene_map(self, output_dp):
+        gpcr_json = join(output_dp, '../uniprot/gpcr_entries.json')
+        print_section_header(
+            "Loading GPCR UniProt entries (%s)" %
+            (bcolors.OKGREEN + gpcr_json + bcolors.ENDC)
+        )
+        start = timer()
+        self.gene_to_uniprot.clear()
+
+        try:
+            with open(gpcr_json, 'r', encoding='utf-8') as fd:
+                data = json.load(fd)
+        except Exception as e:
+            print(f"Error reading {gpcr_json}: {e}")
+            return
+
+        nb_links = 0
+        for uniprot_id, entry in data.items():
+            gene_ids = entry.get('gene_ids', []) or []
+            for gid in gene_ids:
+                if gid is None:
+                    continue
+                gid_str = sys.intern(str(gid).strip())
+                u_str = sys.intern(uniprot_id.strip())
+                if gid_str not in self.gene_to_uniprot:
+                    self.gene_to_uniprot[gid_str] = u_str
+                    nb_links += 1
+
+        print(done_sym + " Took %1.2f Seconds. gene_ids: %d, links: %d"
+              % (timer() - start, len(self.gene_to_uniprot), nb_links),
+              flush=True)
+
+    # ---------------------------
+    # Step 2.5: 读取 PubChem 属性（通用双指针法）
+    # ---------------------------
+    def _read_pubchem_field(self, gz_path, target_cids):
+        """
+        通用流式查找：从形如 "CID<TAB>VALUE" 的 .gz 文件中读取指定 CID 的值。
+        - gz_path: 文件路径
+        - target_cids: 已排序的整数 CID 列表（升序）
+        返回: dict[str_cid] = value
+        进度打印与其它 parser 一致（按匹配条目数计速）。
+        """
+        found = {}
+        if not target_cids:
+            return found
+
+        print_section_header(
+            "Reading PubChem field (%s) for %d CIDs" %
+            (bcolors.OKGREEN + gz_path + bcolors.ENDC, len(target_cids))
+        )
+        start = timer()
+        nb_hits = 0
+        idx = 0  # 双指针：当前目标索引
+
+        try:
+            with gzip.open(gz_path, 'rt', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    if idx >= len(target_cids):
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split('\t', 1)
+                    if len(parts) != 2:
+                        continue
+                    try:
+                        cid = int(parts[0])
+                    except ValueError:
+                        continue
+                    value = parts[1]
+
+                    # 推进目标指针直到 >= 当前行 cid
+                    while idx < len(target_cids) and target_cids[idx] < cid:
+                        idx += 1
+                    if idx >= len(target_cids):
+                        break
+
+                    if target_cids[idx] == cid:
+                        found[str(cid)] = value
+                        nb_hits += 1
+                        if nb_hits % 1000 == 0:
+                            speed = nb_hits / (timer() - start)
+                            msg = prc_sym + "Matched (%d).  Speed: (%1.2f) items/second" % (nb_hits, speed)
+                            print("\r" + msg, end="", flush=True)
+                        idx += 1
+                        # 若有重复目标（通常不会），继续推进
+                        while idx < len(target_cids) and target_cids[idx] == cid:
+                            found[str(cid)] = value
+                            nb_hits += 1
+                            idx += 1
+        except FileNotFoundError:
+            print(f"File not found: {gz_path}")
+        except Exception as e:
+            print(f"Error reading {gz_path}: {e}")
+
+        print(done_sym + " Took %1.2f Seconds. matched=%d" % (timer() - start, nb_hits), flush=True)
+        return found
+
+    def _load_pubchem_props(self, source_dp, cid_set):
+        """
+        从 join(source_dp, '../pubchem/') 下的三个文件读取属性：
+          - CID-IUPAC.gz  ->  IUPAC 名称
+          - CID-SMILES.gz ->  规范 SMILES（默认取整行第二列）
+          - CID-TITLE.gz  ->  Title
+        输入：cid_set 为需要填充属性的 CID 字符串集合
+        返回： dict[cid] = { 'IUPAC Name': ..., 'SMILES': ..., 'Title': ... }
+        """
+        if not cid_set:
+            return {}
+
+        pubchem_dp = join(source_dp, '../pubchem')
+        path_iupac = join(pubchem_dp, 'CID-IUPAC.gz')
+        path_smiles = join(pubchem_dp, 'CID-SMILES.gz')
+        path_title = join(pubchem_dp, 'CID-TITLE.gz')
+
+        # 目标 CID 升序整数列表（双指针要求）
+        try:
+            targets_int = sorted({int(c) for c in cid_set if str(c).isdigit()})
+        except Exception:
+            # 不可转 int 的 CID 忽略
+            targets_int = []
+
+        iupac_map = self._read_pubchem_field(path_iupac, targets_int)
+        smiles_map = self._read_pubchem_field(path_smiles, targets_int)
+        title_map = self._read_pubchem_field(path_title, targets_int)
+
+        merged = {}
+        for c in cid_set:
+            rec = {}
+            if c in iupac_map:
+                rec['IUPAC Name'] = iupac_map[c]
+            if c in smiles_map:
+                rec['SMILES'] = smiles_map[c]
+            if c in title_map:
+                rec['Title'] = title_map[c]
+            if rec:
+                merged[c] = rec
+        return merged
+
+    def _build_name2inchikey_map(self, source_dp, output_dp, name2mesh):
+        name_set = set([sys.intern(x.lower()) for x in name2mesh.keys()])
+        cnt = 0
+
+        name2cid = defaultdict(set)
+        cid_set = set()
+
+        with gzip.open(join(source_dp, '../pubchem/CID-Synonym-filtered.gz'), 'rt', encoding='utf-8') as f:
+            for line in f:
+                CID, name = line.strip().split('\t')
+                if sys.intern(name.lower()) in name_set:
+                    name2cid[name].add(CID)
+                    cid_set.add(CID)
+                cnt += 1
+                if cnt % 100000 == 0:
+                    print(f'\rmatching compound_text to cid, searched {cnt}', end="", flush=True)
+        print(f"\nTotal unique CIDs matched: {len(cid_set)}")
+
+        name2mesh2cid = {}
+        for k, v in name2mesh.items():
+            if k not in name2cid:
+                cids = [self.mesh_to_cids[m] for m in v if m in self.mesh_to_cids]
+                # flatten the list of lists
+                cids = [cid for sublist in cids for cid in sublist]
+                if len(cids) > 0:
+                    cid_set.update(cids)
+                    cids = set(cids)
+                    name2mesh2cid[k] = cids
+                    
+        total_name2cid = dict(name2cid) | name2mesh2cid
+
+        # 3) 过滤读取 CID -> InChIKey
+        ref_fp = join(output_dp, '../pubchem/reference.txt.gz')
+        print_section_header(
+            "Filtering PubChem CID→InChIKey (%s)" %
+            (bcolors.OKGREEN + ref_fp + bcolors.ENDC)
+        )
+        start = timer()
+        nb_entries = 0
+        self.cid_to_inchikey.clear()
+
+        with gzip.open(ref_fp, 'rt', encoding='utf-8') as f:
+            for line in f:
+                cid_raw, inchikey = line.strip().split('\t')
+                cid = sys.intern(cid_raw.replace('CID', '').replace(',', '').strip())
+                if cid in cid_set:
+                    self.cid_to_inchikey[cid] = inchikey
+                    nb_entries += 1
+                    if nb_entries % 1000 == 0:
+                        speed = nb_entries / (timer() - start)
+                        msg = prc_sym + "Filtered (%d) cid-inchikey.  Speed: (%1.5f) entries/second" % (nb_entries, speed)
+                        print("\r" + msg, end="", flush=True)
+        print(done_sym + " Took %1.2f Seconds. Kept %d CIDs"
+                % (timer() - start, len(self.cid_to_inchikey)), flush=True)
+
+        print("Translating names to (CID, InChIKey) pairs...")
+        name2cid_inchikey = {}
+        for k, v in total_name2cid.items():
+            inchikey_set = set()
+            for cid in v:
+                inchikey = self.cid_to_inchikey.get(cid, None)
+                if inchikey is not None:
+                    inchikey_set.add((cid, inchikey))
+            name2cid_inchikey[k] = inchikey_set
+
+        return name2cid_inchikey
+
+    # ---------------------------
+    # Step 3: Main parse — produce llm_cpi.tsv & llm_cinfo.tsv
+    # ---------------------------
+    def parse(self, source_dp, output_dp):
+        """
+        读取 LLM 文本挖掘 jsonl，产出：
+          - llm_cpi.tsv
+          - llm_cinfo.tsv
+        """
+        self.output_dp = output_dp
+        llm_fp = join(source_dp, 'llm.jsonl')
+        self.filepath = llm_fp
+
+        # 先构建 MeSH & Gene 映射
+        self._build_mesh_map(source_dp, output_dp)
+        self._build_gene_map(output_dp)
+
+        with open(join(output_dp, 'mesh2cids.json'), 'w', encoding='utf-8') as f:
+            json.dump(self.mesh_to_cids, f, indent=2)
+        with open(join(output_dp, 'gene2uniprot.json'), 'w', encoding='utf-8') as f:
+            json.dump(self.gene_to_uniprot, f, indent=2)
+        # 解析 LLM jsonl
+        print_section_header(
+            "Parsing LLM text-mining file (%s)" %
+            (bcolors.OKGREEN + llm_fp + bcolors.ENDC)
         )
         start = timer()
 
-        # 蛋白质映射提取
-        with open(join(source_dp, 'merged_protein_llm.json'), 'r', encoding='utf-8') as fd:
-            protein_json = json.load(fd)
+        cpi_rows = []
+        # cinfo 累积信息：InChIKey -> 官方名称 / CID / 以及后续补充的 IUPAC/SMILES/Title
+        inchikey_meta = {}   # ikey -> {'Name': str, 'PubChem Compound ID': str, 'IUPAC Name': str, 'SMILES': str, 'Title': str}
 
-        protein_dict = {}
+        nb_lines = 0
+        nb_rel = 0
+        nb_kept = 0
 
-        for k, v in protein_json.items():
-            is_gpcr = v.get('is_gpcr', 'no')
-            if is_gpcr == 'yes' and v['uniprot_id'] is not None:
-                protein_dict[sys.intern(k)] = v['uniprot_id']
+        name2mesh = defaultdict(set)
+        # 记录本次真正使用到的 CID（用于后续 PubChem 属性补全，避免全量扫描）
+        used_cids = set()
 
-        # cinfo 构建
-        with open(join(source_dp, 'ligand.json'), 'r', encoding='utf-8') as fd:
-            ligand_json = json.load(fd)
-        
-        ligands = []
-        ligand_dict = {}
-        for name, info in ligand_json.items():
-            ligands.append({
-                'InChIKey': info.get('inchikey'),
-                'SMILES': info.get('smi'),
-                'Name': name,
-                'PubChem Compound ID': info.get('cid')
-            })
-            ligand_dict[sys.intern(name)] = info.get('inchikey')
+        with open(llm_fp, 'r', encoding='utf-8') as fd:
+            for raw in fd:
+                nb_lines += 1
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except Exception:
+                    continue
 
+                pmid = str(entry.get('pmid', '')).strip()
+                relations = entry.get('relations')
+                if not isinstance(relations, list):
+                    continue
 
-
-        ligands_df = pd.DataFrame(ligands)
-        ligands_df.to_csv(join(output_dp, 'llm_cinfo.tsv'), sep='\t', index=False, encoding='utf-8')
-
-        # cpi 构建
-        with open(join(source_dp, 'merged_fiter_triple.json'), 'r', encoding='utf-8') as fd:
-            cpi_json = json.load(fd)
-        
-
-        def classify_standard_value(value):
-            value = value.strip()
-            # 1. 纯数字（整数或小数）
-            if re.fullmatch(r'\d+(\.\d+)?', value):
-                return 'pure_number'
-            # 2. 符号 + 数字
-            if re.fullmatch(r'(<=|>=|<|>|=|~)\s*\d+(\.\d+)?', value):
-                return 'symbol_number'
-            # 3. 范围形式（2.2~3、1-4、3 to 8.2）
-            if re.fullmatch(r'\d+(\.\d+)?\s*[-~]\s*\d+(\.\d+)?', value):
-                return 'range'
-            if re.fullmatch(r'\d+(\.\d+)?\s+to\s+\d+(\.\d+)?', value, re.IGNORECASE):
-                return 'range'
-            return 'unknown'
-
-        def split_symbol_number(value):
-            value = value.strip()
-            # 匹配符号和数字，比如 <1、>=5.2、~ 0.01
-            match = re.fullmatch(r'(<=|>=|<|>|=|~)\s*(\d+(\.\d+)?)', value)
-            if match:
-                symbol = match.group(1)
-                number = float(match.group(2))
-                return symbol, number
-            else:
-                return None, None
-        
-        def split_range_number(value):
-            value = value.strip()
-            # 支持形如 "2.2~3", "1-4", "3 to 8.2" 的情况
-            match = re.fullmatch(r'(\d+(\.\d+)?)\s*[-~]\s*(\d+(\.\d+)?)', value)
-            if match:
-                num1 = float(match.group(1))
-                num2 = float(match.group(3))
-                return num1, num2
-            match = re.fullmatch(r'(\d+(\.\d+)?)\s+to\s+(\d+(\.\d+)?)', value, re.IGNORECASE)
-            if match:
-                num1 = float(match.group(1))
-                num2 = float(match.group(3))
-                return num1, num2
-            return None, None
-        
-        def extract_nM_multiplier(s):
-            s = s.strip()
-            # 标准化：替换所有特殊字符
-            s = s.replace("⁻", "-").replace("−", "-").replace("–", "-").replace("—", "-")
-            s = s.translate(str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789"))
-            # 去除多余空格（保留单位前的空格）
-            s = re.sub(r'\s+', '', s)
-            # 正则匹配各种形式： ×10^-10M, x10(-10)M, ×10−10M 等
-            patterns = [
-                r'[×x]10\^?(-?\d+)[mM]',         # ×10^-10M 或 x10^-10M 或 ×10−10M
-                r'[×x]10\((-?\d+)\)[mM]',        # ×10(-10)M 或 x10(-10)M
-            ]
-            for pattern in patterns:
-                match = re.fullmatch(pattern, s)
-                if match:
-                    exp = int(match.group(1))
-                    return 10 ** (9 + exp)  # 换算为 nM 的倍率
-            return None
-            
-        cpi_data = []
-
-        processed_count = 0
-        for paper, content in cpi_json.items():
-            pmc_id = paper.replace('.txt', '')
-            for triple in content:
-                target = sys.intern(triple['target'])
-                ligand = sys.intern(triple['ligand'])
-                if target in protein_dict and ligand in ligand_dict:
-                    # id 处理
-                    target_uniprot_id = protein_dict[target]
-                    compound_inchikey = ligand_dict[ligand]
-
-                    # 单位处理
-                    mult = None
-                    standard_units = triple['unit']
-                    if re.search(r'[\u4e00-\u9fff]', standard_units) is not None:
+                for rel in relations:
+                    if not isinstance(rel, dict):
                         continue
 
-                    if standard_units in ['μΜ', 'μℳ', 'uM', 'μmol', 'μm', 'um', 'uM']:
-                        mult = 1000
-                        standard_units = 'nM'
-                    elif standard_units in ['nM', 'nmol', 'nm']:
-                        mult = 1
-                        standard_units = 'nM'
-                    else:
-                        mult = extract_nM_multiplier(standard_units)
-                        if mult is not None:
-                            standard_units = 'nM'
+                    # 关系/置信度
+                    action_type = rel.get('relation_type')
+                    confidence = rel.get('confidence')
+                    if action_type == 'NO_RELATION':
+                        continue
+                    
+                    # gene_id -> UniProt
+                    gene_id = str(rel.get('protein_id', '')).strip()
+                    uniprot = self.gene_to_uniprot.get(gene_id)
+                    if not uniprot:
+                        continue
 
-                    # 数值符号处理
-                    standard_value = triple['affinity_value']
-                    value_form = classify_standard_value(standard_value)
-                    if value_form == 'pure_number':
-                        standard_value = float(standard_value)
-                        if mult is not None:
-                            standard_value *= mult
-                        standard_relation = '='
-                    elif value_form == 'symbol_number':
-                        standard_relation, standard_value = split_symbol_number(standard_value)
-                        if mult is not None:
-                            standard_value *= mult
+                    compound_id = rel.get('compound_id', '').replace('MESH:', '').strip()
+                    if compound_id == '':
+                        continue
+                    mesh_id = compound_id.upper()
 
-                    elif value_form == 'range':
-                        min_v, max_v = split_range_number(standard_value)
-                        if mult is not None:
-                            min_v *= mult
-                            max_v *= mult
-                        standard_value = f"({min_v}, {max_v})"
-                        standard_relation = 'in'
-                    else:
-                        standard_relation = None
+                    compound_text = rel.get('compound_text', [])
+                    for name in compound_text:
+                        name2mesh[name].add(mesh_id)
 
-                    cpi_entry = {
-                        'target_uniprot_id': target_uniprot_id,
-                        'compound_inchikey': compound_inchikey,
-                        'target_name': target,
-                        'standard_type': triple['affinity_type'],
-                        'standard_relation': standard_relation,
-                        'standard_value': standard_value,
-                        'standard_units': standard_units,
-                        'reference': paper,
-                        'pmc': pmc_id,
-                        'confidence': triple['confidence']
-                    }   
-                    cpi_data.append(cpi_entry)
-                # Progress update
-                processed_count += 1
-                if processed_count % 1000 == 0:
-                    speed = processed_count / (timer() - start)
-                    msg = prc_sym + "Processed (%d) entries, Speed: (%1.2f) entries/second" % (
-                        processed_count, speed)
+                    # 亲和力
+                    affinity = rel.get('affinity') or {}
+                    if not isinstance(affinity, dict):
+                        continue
+                    std_type = affinity.get('type')
+                    std_relation = affinity.get('comparator')
+                    std_value = affinity.get('value')
+                    std_units = affinity.get('unit')
+
+                    
+                    nb_rel += 1
+                    row = {
+                        'compound_text': compound_text,
+                        'target_uniprot_id': uniprot,
+                        'standard_type': std_type,
+                        'standard_relation': std_relation,
+                        'standard_value': std_value,
+                        'standard_units': std_units,
+                        'action_type': action_type,
+                        'confidence': confidence,
+                        'pmid': pmid,
+                        'source_database': 'text_mining'
+                    }
+                    cpi_rows.append(row)
+                    nb_kept += 1
+
+                if nb_lines % 1000 == 0:
+                    speed = nb_rel / (timer() - start) if (timer() - start) > 0 else 0.0
+                    msg = prc_sym + "Processed lines: %d, relations: %d, kept: %d.  Speed: (%1.2f) rels/second" % (
+                        nb_lines, nb_rel, nb_kept, speed)
                     print("\r" + msg, end="", flush=True)
 
-        cpi_df = pd.DataFrame(cpi_data)
-        cpi_df.to_csv(join(output_dp, 'llm_cpi.tsv'), sep='\t', index=False, encoding='utf-8')
-        print(done_sym + " Took %1.2f Seconds." % (timer() - start), flush=True)
+        name2inchikey = self._build_name2inchikey_map(source_dp, output_dp, name2mesh)
+        cpi_rows_inchikey = []
+        for row in cpi_rows:
+            inchikeys = set()
+            for name in row['compound_text']:
+                inchikeys = name2inchikey.get(name, set())
+                for cid, ikey in inchikeys:
+                    used_cids.add(cid)
+                    # 回填 inchikey
+                    new_row = row.copy()
+                    # drop compound_text to save space
+                    new_row.pop('compound_text', None)      
+                    new_row['compound_inchikey'] = ikey
+                    cpi_rows_inchikey.append(new_row)
+
+                    # 回填 cinfo 元数据
+                    meta = inchikey_meta.get(ikey)
+                    if not meta:
+                        inchikey_meta[ikey] = {
+                            'Name': name,
+                            'PubChem Compound ID': cid
+                        }
+                    else:
+                        if name not in meta['Name'].split('||'):
+                            meta['Name'] += '||' + name
+
+
+        print(done_sym + " Took %1.2f Seconds. lines=%d, relations=%d, kept=%d"
+              % (timer() - start, nb_lines, nb_rel, nb_kept),
+              flush=True)
+
+
+        # === 读取 PubChem 属性并补全 cinfo 元数据 ===
+        if used_cids:
+            props = self._load_pubchem_props(source_dp, used_cids)
+            # 将 props 回填到 inchikey_meta（通过其关联的 CID）
+            for ikey, meta in inchikey_meta.items():
+                cid = meta.get('PubChem Compound ID')
+                if cid and cid in props:
+                    for k, v in props[cid].items():
+                        if v is not None and v != '':
+                            meta[k] = v
+
+        # 保存 llm_cpi.tsv
+        if cpi_rows_inchikey:
+            cpi_df = pd.DataFrame(cpi_rows_inchikey)
+            cpi_out = join(output_dp, 'llm_cpi.tsv')
+            cpi_df.to_csv(cpi_out, sep='\t', index=False, encoding='utf-8')
+            print(f"Saved {len(cpi_df)} CPI entries to {cpi_out}")
+        else:
+            print("No CPI rows to save")
+
+        # 生成 & 保存 llm_cinfo.tsv（使用统一 link_head 列）
+        print_section_header("Building llm_cinfo.tsv")
+        cinfo_rows = []
+        for ikey, meta in inchikey_meta.items():
+            row = {h: None for h in link_head}
+            row['InChIKey'] = ikey
+            if meta:
+                row['Name'] = meta.get('Name')                       # 官方 MeSH 名称
+                row['PubChem Compound ID'] = meta.get('PubChem Compound ID')
+                # 新增三列（若 link_head 不含会自动扩展为新列）
+                row['IUPAC Name'] = meta.get('IUPAC Name')
+                row['SMILES'] = meta.get('SMILES')
+                row['Title'] = meta.get('Title')
+            cinfo_rows.append(row)
+
+        if cinfo_rows:
+            cinfo_df = pd.DataFrame(cinfo_rows).drop_duplicates(subset=['InChIKey'])
+            cinfo_out = join(output_dp, 'llm_cinfo.tsv')
+            cinfo_df.to_csv(cinfo_out, sep='\t', index=False, encoding='utf-8')
+            print(f"Saved {len(cinfo_df)} compound entries to {cinfo_out}")
+        else:
+            print("No compound info to save")
+
+        print(done_sym + " LLM text-mining parsing completed.")
 
 
 class GLASSParser:
@@ -2255,4 +2698,4 @@ class GLASSParser:
 
 
 
-        
+    

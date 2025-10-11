@@ -35,7 +35,8 @@ def merge_cinfo(output_dp):
         'BindingDB': join(output_dp, 'bindingdb/bindingdb_cinfo.tsv'),
         'DrugBank': join(output_dp, 'drugbank/drugbank_cinfo.tsv'),
         'PDSP': join(output_dp, 'pdsp/pdsp_cinfo.tsv'),
-        'GLASS': join(output_dp, 'glass/glass_cinfo.tsv')
+        'GLASS': join(output_dp, 'glass/glass_cinfo.tsv'),
+        'LLM': join(output_dp, 'llm/llm_cinfo.tsv'),
     }
     
     # Load all dataframes
@@ -1207,6 +1208,80 @@ class CPIMerger:
 
         return formed_cpi_df
 
+    def _form_llm_cpi(self):
+        """
+        Process LLM text-mining CPI data
+        
+        Returns
+        -------
+        pandas.DataFrame
+            Standardized LLM CPI data
+        """
+        print("Processing LLM text-mining CPI data...")
+        
+        # Load LLM CPI data
+        llm_file = join(self.output_dp, 'llm/llm_cpi.tsv')
+        if not os.path.exists(llm_file):
+            print("LLM CPI file not found")
+            return pd.DataFrame()
+        
+        llm_df = pd.read_csv(llm_file, sep='\t', encoding='utf-8')
+        print(f"Loaded {len(llm_df)} LLM CPI entries")
+        
+        # Skip entries without valid InChIKey
+        valid_df = llm_df[llm_df['compound_inchikey'].notna() & 
+                        (llm_df['compound_inchikey'].str.strip() != '')].copy()
+        
+        skipped_count = len(llm_df) - len(valid_df)
+        if skipped_count > 0:
+            print(f"Skipped {skipped_count} entries without valid InChIKey")
+        
+        # Initialize result container
+        formed_cpi = []
+        
+        # Process each entry
+        for idx, row in tqdm(valid_df.iterrows(), total=len(valid_df), desc="Processing LLM entries"):
+            # Create standardized entry
+            entry = {
+                'compound_inchikey': row['compound_inchikey'],
+                'target_uniprot_id': row['target_uniprot_id'],
+                'source_database': 'text-mining',
+                'source_compound_id': None,  # LLM doesn't have compound IDs
+                'standard_type': row.get('standard_type'),
+                'standard_relation': row.get('standard_relation'),
+                'standard_value': row.get('standard_value'),
+                'standard_units': row.get('standard_units'),
+                'activity_comment': None,  # LLM doesn't have activity comments
+                'action_type': row.get('action_type'),
+                'confidence': row.get('confidence'),
+                'pmid': row.get('pmid'),
+                'classification': None
+            }
+            formed_cpi.append(entry)
+        
+        # Convert to DataFrame
+        formed_cpi_df = pd.DataFrame(formed_cpi)
+        
+        # Print statistics
+        print(f"\nLLM CPI Processing Results:")
+        print(f"  - Valid CPI entries: {len(formed_cpi_df)}")
+        
+        # Show standard_type distribution
+        if not formed_cpi_df.empty:
+            print(f"\nStandard Type Distribution in LLM CPI:")
+            type_counts = formed_cpi_df['standard_type'].value_counts()
+            for stype, count in type_counts.head(10).items():
+                print(f"  - {stype}: {count}")
+            
+            # Show confidence distribution
+            if 'confidence' in formed_cpi_df.columns:
+                print(f"\nConfidence Distribution:")
+                conf_counts = formed_cpi_df['confidence'].value_counts()
+                for conf, count in conf_counts.items():
+                    print(f"  - {conf}: {count}")
+        
+        return formed_cpi_df
+
     def _form_glass_cpi(self):
         """
         Process GLASS CPI data
@@ -1370,12 +1445,20 @@ class CPIMerger:
         if not glass_cpi.empty:
             all_formed_cpi.append(glass_cpi)
         
+        # Process LLM (returns 1 DataFrame - all are formed_cpi)
+        print("=" * 60)
+        llm_cpi = self._form_llm_cpi()
+
+        # if not llm_cpi.empty:
+        #     all_formed_cpi.append(llm_cpi)
+
         # Combine results
         print("=" * 60)
         print("Combining all CPI data...")
         
         results = {}
         
+        results['llm_cpi'] = llm_cpi  # keep LLM CPI separate for now
         # Combine formed_cpi
         if all_formed_cpi:
             results['formed_cpi'] = pd.concat(all_formed_cpi, ignore_index=True, sort=False)
@@ -1482,76 +1565,76 @@ def id_cpi_pairs(cpi_df):
     print(f"Took {timer() - start:.2f} Seconds.")
     return df
 
-def deduplicate_cpi_pairs(cpi_df):
-    print("Deduplicating CPI pairs...")
-    start = timer()
+# def deduplicate_cpi_pairs(cpi_df):
+#     print("Deduplicating CPI pairs...")
+#     start = timer()
     
-    if cpi_df.empty:
-        print("No CPI data to process")
-        return pd.DataFrame()
+#     if cpi_df.empty:
+#         print("No CPI data to process")
+#         return pd.DataFrame()
     
-    original_count = len(cpi_df)
+#     original_count = len(cpi_df)
     
-    # Create grouping key for identical experimental records
-    # Fill NaN with empty string for consistent grouping
-    df = cpi_df.copy()
-    key_cols = ['pair_id', 'standard_type', 'standard_relation', 'standard_value', 'standard_units']
-    for col in key_cols:
-        if col in df.columns:
-            df[col] = df[col].fillna('')
+#     # Create grouping key for identical experimental records
+#     # Fill NaN with empty string for consistent grouping
+#     df = cpi_df.copy()
+#     key_cols = ['pair_id', 'standard_type', 'standard_relation', 'standard_value', 'standard_units']
+#     for col in key_cols:
+#         if col in df.columns:
+#             df[col] = df[col].fillna('')
     
-    # Group by experimental record identity
-    grouped = df.groupby(key_cols, dropna=False)
+#     # Group by experimental record identity
+#     grouped = df.groupby(key_cols, dropna=False)
     
-    def merge_string_fields(series, sep=','):
-        """Merge comma-separated string fields into unique set"""
-        all_values = set()
-        for val in series.dropna():
-            if pd.notna(val) and str(val).strip():
-                # Split by comma and add to set
-                all_values.update([v.strip() for v in str(val).split(',') if v.strip()])
-        return sep.join(sorted(all_values)) if all_values else None
+#     def merge_string_fields(series, sep=','):
+#         """Merge comma-separated string fields into unique set"""
+#         all_values = set()
+#         for val in series.dropna():
+#             if pd.notna(val) and str(val).strip():
+#                 # Split by comma and add to set
+#                 all_values.update([v.strip() for v in str(val).split(',') if v.strip()])
+#         return sep.join(sorted(all_values)) if all_values else None
     
-    # Aggregate function for each group
-    agg_dict = {}
+#     # Aggregate function for each group
+#     agg_dict = {}
     
-    # Keep first value for non-mergeable fields
-    single_value_cols = [col for col in df.columns if col not in key_cols + ['source_database', 'pmid', 'doi']]
-    for col in single_value_cols:
-        agg_dict[col] = 'first'
+#     # Keep first value for non-mergeable fields
+#     single_value_cols = [col for col in df.columns if col not in key_cols + ['source_database', 'pmid', 'doi']]
+#     for col in single_value_cols:
+#         agg_dict[col] = 'first'
     
-    # Merge source databases, pmids, and dois
-    merge_cols = ['source_database', 'pmid', 'doi']
-    for col in merge_cols:
-        if col in df.columns:
-            agg_dict[col] = lambda x, col=col: merge_string_fields(x)
+#     # Merge source databases, pmids, and dois
+#     merge_cols = ['source_database', 'pmid', 'doi']
+#     for col in merge_cols:
+#         if col in df.columns:
+#             agg_dict[col] = lambda x, col=col: merge_string_fields(x)
     
-    # Apply aggregation
-    deduplicated_df = grouped.agg(agg_dict).reset_index()
+#     # Apply aggregation
+#     deduplicated_df = grouped.agg(agg_dict).reset_index()
     
-    # Restore NaN for empty strings in key columns
-    for col in key_cols:
-        if col in deduplicated_df.columns:
-            deduplicated_df[col] = deduplicated_df[col].replace('', pd.NA)
+#     # Restore NaN for empty strings in key columns
+#     for col in key_cols:
+#         if col in deduplicated_df.columns:
+#             deduplicated_df[col] = deduplicated_df[col].replace('', pd.NA)
     
-    # Reorder columns to match original
-    original_cols = [col for col in cpi_df.columns if col in deduplicated_df.columns]
-    deduplicated_df = deduplicated_df[original_cols]
+#     # Reorder columns to match original
+#     original_cols = [col for col in cpi_df.columns if col in deduplicated_df.columns]
+#     deduplicated_df = deduplicated_df[original_cols]
     
-    # Sort by pair_id
-    deduplicated_df = deduplicated_df.sort_values('pair_id').reset_index(drop=True)
+#     # Sort by pair_id
+#     deduplicated_df = deduplicated_df.sort_values('pair_id').reset_index(drop=True)
     
-    duplicates_removed = original_count - len(deduplicated_df)
+#     duplicates_removed = original_count - len(deduplicated_df)
     
-    print(f"Deduplication Results:")
-    print(f"  - Original entries: {original_count}")
-    print(f"  - Final entries: {len(deduplicated_df)}")
-    print(f"  - Duplicates removed: {duplicates_removed}")
-    print(f"  - Deduplication rate: {duplicates_removed/original_count*100:.1f}%")
+#     print(f"Deduplication Results:")
+#     print(f"  - Original entries: {original_count}")
+#     print(f"  - Final entries: {len(deduplicated_df)}")
+#     print(f"  - Duplicates removed: {duplicates_removed}")
+#     print(f"  - Deduplication rate: {duplicates_removed/original_count*100:.1f}%")
     
-    print(done_sym + f" Took {timer() - start:.2f} Seconds.")
+#     print(done_sym + f" Took {timer() - start:.2f} Seconds.")
     
-    return deduplicated_df
+#     return deduplicated_df
 
 def deduplicate_cpi_pairs(cpi_df):
     print("Deduplicating CPI pairs...")
@@ -1568,7 +1651,9 @@ def deduplicate_cpi_pairs(cpi_df):
     print("Preparing data for grouping...")
     df = cpi_df.copy()
 
-    key_cols = ['pair_id', 'standard_type', 'standard_value', 'standard_units']  # 移除standard_relation
+    # TODO: 增加对action_type的处理 
+    key_cols = ['pair_id', 'standard_type', 'standard_value', 'standard_units', 'action_type']  # 移除standard_relation
+    # key_cols = ['pair_id', 'standard_type', 'standard_value', 'standard_units']  # 移除standard_relation
     for col in key_cols:
         if col in df.columns:
             df[col] = df[col].fillna('')
@@ -1587,6 +1672,35 @@ def deduplicate_cpi_pairs(cpi_df):
                 # Split by comma and add to set
                 all_values.update([v.strip() for v in str(val).split(',') if v.strip()])
         return sep.join(sorted(all_values)) if all_values else None
+
+    def merge_confidence(series):
+        """
+        智能合并confidence值，优先级: high > medium > low > None
+        对于不在预期范围内的值，置为空
+        """
+        # 定义置信度优先级
+        confidence_priority = {
+            'high': 3,
+            'medium': 2, 
+            'low': 1
+        }
+        
+        # 过滤掉空值和无效值，只保留有效的confidence值
+        valid_values = []
+        for val in series.dropna():
+            if pd.notna(val) and str(val).strip():
+                clean_val = str(val).strip().lower()
+                # 只接受预定义的confidence值
+                if clean_val in confidence_priority:
+                    valid_values.append(clean_val)
+        
+        # 如果没有有效值，返回NaN
+        if not valid_values:
+            return pd.NA
+        
+        # 返回优先级最高的值
+        best_confidence = max(valid_values, key=lambda x: confidence_priority[x])
+        return best_confidence
     
     def merge_relations(series):
         """Merge relations: if different relations exist, use '~', otherwise keep the original"""
@@ -1621,6 +1735,10 @@ def deduplicate_cpi_pairs(cpi_df):
     for col in single_value_cols:
         agg_dict[col] = 'first'
     
+    # Special handling for confidence - use priority-based merging
+    if 'confidence' in df.columns:
+        agg_dict['confidence'] = merge_confidence
+
     # Special handling for standard_relation
     if 'standard_relation' in df.columns:
         agg_dict['standard_relation'] = merge_relations
@@ -1863,6 +1981,10 @@ def merge_all_cpi_data(output_dp, comile_dp='database/glass2'):
     result = cpi_merger.merge_cpi()
     general_df, inactive_df, uncertain_df = result['formed_cpi'], result['inactive_cpi'], result['uncertain_cpi']
 
+    llm_df = result['llm_cpi']
+    llm_df = id_cpi_pairs(llm_df)
+    llm_df = postprocess_cpi(llm_df)
+
     # 添加 旧版数据区分
     general_df['glass1'] = general_df['glass1'].fillna('no')
 
@@ -1884,6 +2006,7 @@ def merge_all_cpi_data(output_dp, comile_dp='database/glass2'):
     inactive_df = postprocess_cpi(inactive_df) # 后处理CPI数据
     inactive_df = deduplicate_cpi_pairs(inactive_df) # 去重 CPI对
     inactive_df = normalize_uniprot_ids(inactive_df, current_ids, history2current) # 归一化Uniprot ID
+    inactive_df['classification'] = inactive_df['classification'].fillna('uncertain')  # 确保分类一致
 
     # 处理 uncertain_df
     uncertain_df = pd.concat([uncertain_df, general_uncertain_df], ignore_index=True, sort=False) # 合并不确定的CPI对
@@ -1891,6 +2014,7 @@ def merge_all_cpi_data(output_dp, comile_dp='database/glass2'):
     uncertain_df = postprocess_cpi(uncertain_df) # 后处理CPI数据
     uncertain_df = deduplicate_cpi_pairs(uncertain_df) # 去重 CPI对
     uncertain_df = normalize_uniprot_ids(uncertain_df, current_ids, history2current) # 归一化Uniprot ID
+    uncertain_df['classification'] = uncertain_df['classification'].fillna('uncertain')  # 确保分类一致
 
     # ============== 分类与回归数据集处理 ==============
 
@@ -1918,7 +2042,7 @@ def merge_all_cpi_data(output_dp, comile_dp='database/glass2'):
     conflict_pairs = pair_label_counts[pair_label_counts > 1].index
     cls_df = cls_df[~cls_df['pair_id'].isin(conflict_pairs)].reset_index(drop=True)
     # 'compound_inchikey' dropna
-    cls_df = cls_df.dropna(subset=['compound_inchikey'])
+    cls_df = cls_df.dropna(subset=['compound_inchikey', 'classification'])
 
     # 2. 回归数据集（reg_df）
     reg_mask = lambda df: df['standard_type'].isin(['IC50', 'EC50', 'Ki', 'Kd']) & (df['standard_units'] == 'nM')
@@ -1936,11 +2060,24 @@ def merge_all_cpi_data(output_dp, comile_dp='database/glass2'):
     reg_inact_df = reg_inact_df.dropna(subset=['compound_inchikey'])
 
     #  ============== 合并完整数据，重编号并同步 ==============
-    full_cpi_df = pd.concat([active_df, inactive_df, uncertain_df], ignore_index=True, sort=False)
+    # TODO: 后面考虑把合并是不是应该把inactive_df改为reg_inact_df？
+    # full_cpi_df = pd.concat([active_df, inactive_df, uncertain_df], ignore_index=True, sort=False)
+
+    full_cpi_df = pd.concat([active_df, inactive_df, uncertain_df, llm_df], ignore_index=True, sort=False)
     full_cpi_df = id_cpi_pairs(full_cpi_df, prefix='GLASS')  # 为每个CPI对分配唯一ID
     # 'compound_inchikey' dropna
     full_cpi_df = full_cpi_df.dropna(subset=['compound_inchikey'])
 
+    full_cpi_df = deduplicate_cpi_pairs(full_cpi_df)
+    
+    # 对 source_database 列去重并小写化
+    def dedup_lower(s):
+        if pd.isna(s):
+            return s
+        items = [x.strip().lower() for x in str(s).split(',') if x.strip()]
+        return ','.join(sorted(set(items)))
+    full_cpi_df['source_database'] = full_cpi_df['source_database'].apply(dedup_lower)
+    
     # 构建 (compound_inchikey, target_uniprot_id) 到新pair_id的映射
     pair_map = dict(zip(
         zip(full_cpi_df['compound_inchikey'], full_cpi_df['target_uniprot_id']),
@@ -1961,10 +2098,26 @@ def merge_all_cpi_data(output_dp, comile_dp='database/glass2'):
     reg_act_df = sync_pair_id(reg_act_df)
     reg_inact_df = sync_pair_id(reg_inact_df)
 
+    # 保留最优实验记录
+    reg_act_df['standard_value_num'] = pd.to_numeric(reg_act_df['standard_value'], errors='coerce')
+    reg_act_df = reg_act_df.sort_values('standard_value_num', ascending=True)
+    reg_act_df = reg_act_df.drop_duplicates(
+        subset=['pair_id', 'standard_type', 'standard_relation', 'standard_units'],
+        keep='first'
+    )
+    reg_act_df = reg_act_df.drop(columns=['standard_value_num'])
+
+
+    common_pair_ids = list(set(reg_act_df['pair_id']) & set(reg_inact_df['pair_id']))
+    print(f"Number of common pair_id: {len(common_pair_ids)}")
+    reg_act_df = reg_act_df[~reg_act_df['pair_id'].isin(common_pair_ids)]
+    reg_inact_df = reg_inact_df[~reg_inact_df['pair_id'].isin(common_pair_ids)]
+
+
     cls_df.to_csv(join(comile_dp, 'glass2_cls.csv'), index=False, encoding='utf-8')
     reg_act_df.to_csv(join(comile_dp, 'glass2_reg_act.csv'), index=False, encoding='utf-8')
     reg_inact_df.to_csv(join(comile_dp, 'glass2_reg_inact.csv'), index=False, encoding='utf-8')
-    full_cpi_df.to_csv(join(comile_dp, 'glass2_full_cpi.tsv'), sep='\t', index=False, encoding='utf-8')
+    full_cpi_df.to_csv(join(comile_dp, 'glass2_full.tsv'), sep='\t', index=False, encoding='utf-8')
 
     # 返回所有结果
     return {

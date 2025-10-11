@@ -166,3 +166,59 @@ def download_glass_data(sources_dp, srcs_cp):
     download_file_md5_check(srcs_cp["glass"]["ligands"], ligands_fp)
 
     print_bold_line()
+
+def download_llm_data(sources_dp, srcs_cp):
+    """ Download llm database files
+    Parameters
+    ----------
+    sources_dp : str
+        the sources directory path
+    srcs_cp : RawConfigParser
+        source urls config parser
+    """
+    os.makedirs(sources_dp, exist_ok=True)
+    print_section_header("Downloading llm data files")
+    mesh_fp = join(sources_dp, "mesh_supp.xml")
+    download_file_md5_check(srcs_cp["ref"]["supp"], mesh_fp)
+    cid2mesh_fp = join(sources_dp, "cid2mesh.txt")
+    download_file_md5_check(srcs_cp["ref"]["cid2mesh"], cid2mesh_fp)
+
+    if isfile(join("manually_prepared", "llm.jsonl")):
+        copyfile(join("manually_prepared", "llm.jsonl"), join(sources_dp, "llm.jsonl"))
+    else:
+        raise FileNotFoundError("File llm.jsonl not found in manually_prepared folder,\
+                                please check manually_prepared/README.md to prepare the data")
+    print_bold_line()
+
+def download_pubchem_data(sources_dp, srcs_cp):
+    """ Download pubchem database files
+    Parameters
+    ----------
+    sources_dp : str
+        the sources directory path
+    srcs_cp : RawConfigParser
+        source urls config parser
+    """
+    os.makedirs(sources_dp, exist_ok=True)
+    print_section_header("Downloading PubChem data files")
+
+    url = srcs_cp["pubchem"]["inchikey"]
+    response = requests.get(url)
+    response.raise_for_status()  # 确保请求成功
+    # 使用 BeautifulSoup 解析 HTML
+    soup = BeautifulSoup(response.text, "html.parser")
+    # 提取所有 .gaf.gz 文件链接
+
+    for link in soup.find_all("a"):
+        href = link.get("href")
+        if href and 'pc_inchikey2compound' in href:  # 筛选出 .gaf.gz 文件
+            filename = href.split("/")[-1]
+            save_path = join(sources_dp, filename)
+            cur_url = join(url, href)
+            download_file_md5_check(cur_url, save_path)
+    
+    title = join(sources_dp, "source.tsv.gz")
+    download_file_md5_check(srcs_cp["pubchem"]["title"], title)
+    iupac = join(sources_dp, "iupac.tsv.gz")
+    download_file_md5_check(srcs_cp["pubchem"]["iupac"], iupac)
+    print_bold_line()
