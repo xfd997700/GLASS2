@@ -66,17 +66,4 @@ database/glass2/
 └── uci_xref.json            # Cross-references for compound identifiers
 ```
 
-### Dataset Descriptions
 
-- **Classification datasets** (`glass2_cls.csv`): Binary labels for compound-protein interactions
-- **Regression datasets** (`glass2_reg_act.csv`, `glass2_reg_inact.csv`): Quantitative binding affinity values (Ki, Kd, IC50, EC50) for active and inactive compounds
-- **Full dataset** (`glass2_full.tsv`): Complete interaction records with all metadata
-- **Ligand information** (`ligands.tsv`): Chemical structures and identifiers
-- **Protein information** (`protein.json`): GPCR target details and annotations
-- **Cross-reference mappings**: Identifier mappings for data integration
-
-## Notes
-
-- The pipeline automatically checks MD5 hashes to avoid redundant processing of unchanged files
-- Processing time varies depending on data size and system performance
-- Ensure sufficient disk space for downloaded source files and processed outputs
