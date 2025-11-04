@@ -1895,11 +1895,25 @@ def postprocess_cpi(df):
 
     return df
 
-
-
 def mark_inactive_by_threshold(df, threshold=10000):
     df = df.copy()
     df['standard_relation'] = df['standard_relation'].fillna('=')
+    
+    # 首先删除 'IC50', 'EC50', 'Ki', 'Kd' 中包含负数值的行
+    mask_types = df['standard_type'].isin(['IC50', 'EC50', 'Ki', 'Kd']) & (df['standard_units'] == 'nM')
+    df_types = df[mask_types].copy()
+    df_types['standard_value_num'] = pd.to_numeric(df_types['standard_value'], errors='coerce')
+    
+    # 找到负数值的行索引
+    negative_mask = df_types['standard_value_num'] < 0
+    negative_indices = df_types[negative_mask].index
+    
+    # 从原始dataframe中删除这些行
+    if len(negative_indices) > 0:
+        print(f"Removing {len(negative_indices)} rows with negative values in IC50/EC50/Ki/Kd")
+        df = df.drop(negative_indices).reset_index(drop=True)
+    
+    # 重新计算mask，因为dataframe已经改变
     mask = (
         df['standard_type'].isin(['IC50', 'EC50', 'Ki', 'Kd']) &
         (df['standard_units'] == 'nM')
@@ -1937,6 +1951,47 @@ def mark_inactive_by_threshold(df, threshold=10000):
     idx = sub_df.index
     df.loc[idx, 'classification'] = sub_df.apply(classify, axis=1)
     return df
+
+# def mark_inactive_by_threshold(df, threshold=10000):
+#     df = df.copy()
+#     df['standard_relation'] = df['standard_relation'].fillna('=')
+#     mask = (
+#         df['standard_type'].isin(['IC50', 'EC50', 'Ki', 'Kd']) &
+#         (df['standard_units'] == 'nM')
+#     )
+
+#     # 只将其他类型中 classification 为空的填为 'uncertain'
+#     df.loc[~mask & df['classification'].isna(), 'classification'] = 'uncertain'
+
+#     sub_df = df[mask].copy()
+#     sub_df['standard_value_num'] = pd.to_numeric(sub_df['standard_value'], errors='coerce')
+
+#     def classify(row):
+#         rel = str(row['standard_relation']).strip()
+#         val = row['standard_value_num']
+#         if pd.isna(val):
+#             return row.get('classification', None)
+#         if rel in ['=', '==', '', '~']:
+#             if val > threshold:
+#                 return 'inactive'
+#             else:
+#                 return 'active'
+#         elif rel in ['>', '>=', '>>']:
+#             if val >= threshold:
+#                 return 'inactive'
+#             else:
+#                 return 'active'
+#         elif rel in ['<', '<=', '<<']:
+#             if val > threshold:
+#                 return 'uncertain'
+#             else:
+#                 return 'active'
+#         return 'uncertain'
+
+#     # 应用分类
+#     idx = sub_df.index
+#     df.loc[idx, 'classification'] = sub_df.apply(classify, axis=1)
+#     return df
 
 def normalize_uniprot_ids(df,
                           current_ids, history2current,
@@ -2127,3 +2182,45 @@ def merge_all_cpi_data(output_dp, comile_dp='database/glass2'):
         'full': full_cpi_df,
     }
 
+def reg_postprocess(act_file_path, inact_file_path):
+    import pandas as pd
+    
+    print("Processing active file...")
+    # 读取活性文件
+    df_act = pd.read_csv(act_file_path)
+    original_act_rows = len(df_act)
+
+    # 步骤1: 删除standard_relation为'>'或'>='的行以及standard_value<0的行
+    df_act = df_act[~df_act['standard_relation'].isin(['>', '>='])]
+    df_act = df_act[df_act['standard_value'] >= 0]
+    # 删除包含NaN的行
+    df_act = df_act.dropna(subset=['pair_id', 'standard_type', 'standard_value'])
+    
+    # 步骤2: 处理重复的(pair_id, standard_type)对，保留standard_value最小的行
+    df_act = df_act.loc[df_act.groupby(['pair_id', 'standard_type'])['standard_value'].idxmin()]
+    after_dedup = len(df_act)
+
+    
+    total_act_removed = original_act_rows - after_dedup
+
+    # 读取非活性文件
+    df_inact = pd.read_csv(inact_file_path)
+    original_inact_rows = len(df_inact)
+
+    
+    # 删除包含NaN的行
+    df_inact = df_inact.dropna(subset=['pair_id', 'standard_type', 'standard_value'])
+
+    df_inact = df_inact.loc[df_inact.groupby(['pair_id', 'standard_type'])['standard_value'].idxmax()]
+    after_dedup_inact = len(df_inact)
+    
+    total_inact_removed = original_inact_rows - after_dedup_inact
+
+    # 保存文件
+    df_act.to_csv(act_file_path, index=False)
+    df_inact.to_csv(inact_file_path, index=False)
+    
+    print("Processing completed. Files saved.")
+    print(f"Summary:")
+    print(f"  Active file: {original_act_rows} -> {after_dedup} ({total_act_removed} removed)")
+    print(f"  Inactive file: {original_inact_rows} -> {after_dedup_inact} ({total_inact_removed} removed)")

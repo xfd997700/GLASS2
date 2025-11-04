@@ -6,7 +6,7 @@ from src.parsers import *
 from src.file_io import export_file_md5, file_has_valid_md5
 from src.extras import inf_sym, done_sym
 from src.info import ART_LOGO, ART_VERSION, PRINT_INFO
-from src.compile_func import merge_all_compound_info, fetch_xref, merge_all_cpi_data
+from src.compile_func import merge_all_compound_info, fetch_xref, merge_all_cpi_data, reg_postprocess
 import shutil
 config = RawConfigParser()
 config.read('src/sources.ini')
@@ -276,4 +276,5 @@ result['reg_act'].to_csv(join(compile_dp, 'glass2_reg_act.csv'), index=False, en
 result['reg_inact'].to_csv(join(compile_dp, 'glass2_reg_inact.csv'), index=False, encoding='utf-8')
 result['full'].to_csv(join(compile_dp, 'glass2_full.tsv'), sep='\t', index=False, encoding='utf-8')
 
+reg_postprocess(join(compile_dp, 'glass2_reg_act.csv'), join(compile_dp, 'glass2_reg_inact.csv'))
 # %%
